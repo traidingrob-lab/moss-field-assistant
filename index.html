@@ -11,10 +11,10 @@
   something like <img onerror="..."> into the DOM, the browser would refuse
   to run it. style-src needs unsafe-inline because the app renders layout
   via inline style="" attributes throughout (no build step to hash them).
-  connect-src is 'self' only for now — Phase 2 (Microsoft Graph/OneDrive)
-  will need to add https://graph.microsoft.com and
-  https://login.microsoftonline.com here, or those requests will silently
-  fail with a CSP violation instead of an obvious network error.
+  connect-src/frame-src add Microsoft's own domains for Phase 2
+  (sign-in + Graph API calls to OneDrive) — nothing else third-party is
+  allowed in. MSAL.js itself is vendored locally (msal-browser.min.js)
+  rather than loaded from a CDN, so script-src stays locked to 'self'.
 
   NOTE: frame-ancestors (clickjacking protection) is deliberately NOT set
   here — the CSP spec ignores that directive entirely when delivered via
@@ -29,7 +29,8 @@
   style-src 'self' 'unsafe-inline';
   img-src 'self' data:;
   font-src 'self';
-  connect-src 'self';
+  connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com;
+  frame-src https://login.microsoftonline.com;
   media-src 'self' data: blob:;
   object-src 'none';
   base-uri 'self';
@@ -50,6 +51,10 @@
 </div>
 <div id="toast" class="toast"></div>
 
+<script src="msal-browser.min.js"></script>
+<script src="config.js"></script>
+<script src="auth.js"></script>
+<script src="graph.js"></script>
 <script src="db.js"></script>
 <script src="app.js"></script>
 </body>
