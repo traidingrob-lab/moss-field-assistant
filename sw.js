@@ -2,7 +2,7 @@
 // thing that makes the service worker notice new code exists — forgetting
 // to bump it just means the network-first strategy below re-fetches fresh
 // files anyway, so this mainly controls when the OLD cache gets swept away.
-const CACHE = "moss-cache-v2";
+const CACHE = "moss-cache-v4";
 
 // App-shell files: always try the network first so an installed PWA picks
 // up new code as soon as it's online, falling back to cache only when
@@ -14,6 +14,10 @@ const SHELL_ASSETS = [
   "./style.css",
   "./app.js",
   "./db.js",
+  "./auth.js",
+  "./graph.js",
+  "./config.js",
+  "./msal-browser.min.js",
   "./manifest.json"
 ];
 
