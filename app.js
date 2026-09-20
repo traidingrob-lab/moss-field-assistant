@@ -80,6 +80,11 @@ window.addEventListener("hashchange", () => {
 
 window.addEventListener("DOMContentLoaded", async () => {
   try {
+    // Fire-and-forget: resolves the redirect-back leg of Microsoft sign-in
+    // as early as possible, whichever screen the user lands back on.
+    // renderSettings() awaits the same (idempotent) promise before it
+    // needs the result, so this doesn't need to block boot.
+    initMsal();
     await MossDB.seedIfEmpty();
     await render();
   } catch (err) {
@@ -293,6 +298,18 @@ async function openNewProjectSheet() {
     closeSheet();
     toast("Project created");
     render();
+
+    // Best-effort: mirror the standard folder set into OneDrive so this
+    // project has somewhere for captures to sync to. Silent on failure —
+    // the project still works locally either way.
+    if (msalConfigured() && msCurrentAccount()) {
+      try {
+        const token = await msGetToken();
+        if (token) await ensureProjectFolders(name, token);
+      } catch (err) {
+        console.error("Failed to create OneDrive folders for new project", err);
+      }
+    }
   });
 }
 
@@ -548,6 +565,16 @@ async function renderAsk() {
 // ---------- Settings ----------
 
 async function renderSettings() {
+  await initMsal();
+  const configured = msalConfigured();
+  const account = msCurrentAccount();
+
+  const oneDriveDesc = !configured
+    ? "Setup needed — ask Claude to finish connecting your Azure app"
+    : account
+    ? `Connected as ${escapeHtml(account.username)}`
+    : "Not connected";
+
   const header = `
     <div class="topbar">
       <div class="project-head"><div class="title" style="font-size:20px;">Settings</div></div>
@@ -555,12 +582,28 @@ async function renderSettings() {
   `;
   const body = `
     <div class="card card-list">
-      <div class="row"><span class="icon">☁️</span><span class="main"><span class="title">OneDrive / SharePoint</span><span class="desc">Not connected yet — Phase 2</span></span></div>
+      <div class="row">
+        <span class="icon">☁️</span>
+        <span class="main"><span class="title">OneDrive / SharePoint</span><span class="desc">${oneDriveDesc}</span></span>
+        ${
+          configured
+            ? `<button class="btn ${account ? "ghost" : "primary"}" style="flex:none; padding:8px 14px; font-size:13px;" id="onedrive-toggle">${account ? "Disconnect" : "Connect"}</button>`
+            : ""
+        }
+      </div>
       <div class="row"><span class="icon">🤖</span><span class="main"><span class="title">AI processing</span><span class="desc">Not connected yet — Phase 3</span></span></div>
-      <div class="row"><span class="icon">💾</span><span class="main"><span class="title">Data storage</span><span class="desc">Stored locally on this device</span></span></div>
+      <div class="row"><span class="icon">💾</span><span class="main"><span class="title">Data storage</span><span class="desc">Stored locally on this device${account ? ", synced to OneDrive" : ""}</span></span></div>
     </div>
   `;
   shell({ header, body, activeTab: "settings" });
+
+  const $toggle = document.getElementById("onedrive-toggle");
+  if ($toggle) {
+    $toggle.addEventListener("click", async () => {
+      if (account) await msSignOut();
+      else await msSignIn();
+    });
+  }
 }
 
 // ---------- Quick capture ----------
@@ -633,6 +676,7 @@ function capturePhoto(projectId) {
     await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name });
     toast("Photo saved");
     if (currentRoute().name === "project") render();
+    syncCaptureToOneDrive(projectId, "photo", file, file.name || `photo-${Date.now()}.jpg`);
   });
   input.click();
 }
@@ -647,6 +691,7 @@ function captureDocument(projectId) {
     await MossDB.captures.add({ projectId, type: "document", name: file.name, size: file.size });
     toast(`Saved "${file.name}"`);
     if (currentRoute().name === "project") render();
+    syncCaptureToOneDrive(projectId, "document", file, file.name);
   });
   input.click();
 }
@@ -687,6 +732,8 @@ async function captureVoice(projectId) {
         await MossDB.captures.add({ projectId, type: "voice", dataUrl });
         toast("Voice note saved");
         if (currentRoute().name === "project") render();
+        const ext = (recorder.mimeType || "audio/webm").includes("mp4") ? "m4a" : "webm";
+        syncCaptureToOneDrive(projectId, "voice", blob, `voice-${Date.now()}.${ext}`);
       });
     };
 
@@ -867,4 +914,30 @@ function fileToDataUrl(file) {
 
 function blobToDataUrl(blob) {
   return fileToDataUrl(blob);
+}
+
+// ---------- OneDrive sync (Phase 2) ----------
+// Best-effort: MossDB/IndexedDB is always the source of truth for the app
+// itself, so a sync failure here should never block or undo a capture —
+// only skip the OneDrive copy and let the user know via toast.
+
+function syncSubfolderFor(type) {
+  if (type === "photo") return "02 PHOTOS/02 PROGRESS";
+  if (type === "voice") return "04 DAILY LOGS";
+  return "01 PLANS & DRAWINGS/CURRENT"; // document
+}
+
+async function syncCaptureToOneDrive(projectId, type, blob, fileName) {
+  if (!msalConfigured() || !msCurrentAccount()) return; // local-only until connected
+  try {
+    const project = await MossDB.projects.get(projectId);
+    if (!project) return;
+    const token = await msGetToken();
+    if (!token) return; // msGetToken() already kicked off a re-auth redirect if needed
+    await uploadToOneDrive(project.name, syncSubfolderFor(type), fileName, blob, token);
+    toast("Synced to OneDrive");
+  } catch (err) {
+    console.error("OneDrive sync failed", err);
+    toast("Saved locally (OneDrive sync failed)");
+  }
 }
