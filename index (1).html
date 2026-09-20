@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1C2530">
+<!--
+  Defense in depth against injection: our own code never uses inline
+  <script>, onclick="" attributes, or eval, so script-src can stay locked to
+  'self' with no unsafe-inline — meaning even if an escaping bug ever let
+  something like <img onerror="..."> into the DOM, the browser would refuse
+  to run it. style-src needs unsafe-inline because the app renders layout
+  via inline style="" attributes throughout (no build step to hash them).
+  connect-src/frame-src add Microsoft's own domains for Phase 2
+  (sign-in + Graph API calls to OneDrive) — nothing else third-party is
+  allowed in. MSAL.js itself is vendored locally (msal-browser.min.js)
+  rather than loaded from a CDN, so script-src stays locked to 'self'.
+
+  NOTE: frame-ancestors (clickjacking protection) is deliberately NOT set
+  here — the CSP spec ignores that directive entirely when delivered via
+  a <meta> tag, so putting it here would silently do nothing while looking
+  like it's protecting the app. Whatever host serves this in production
+  needs to send `Content-Security-Policy: frame-ancestors 'none'` (or
+  `X-Frame-Options: DENY`) as a real HTTP response header instead.
+-->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  style-src 'self' 'unsafe-inline';
+  img-src 'self' data:;
+  font-src 'self';
+  connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com https://*.microsoftpersonalcontent.com;
+  frame-src https://login.microsoftonline.com;
+  media-src 'self' data: blob:;
+  object-src 'none';
+  base-uri 'self';
+  form-action 'self';
+">
+<title>Moss AI Field Assistant</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"></div>
+
+<div id="sheet-backdrop" class="sheet-backdrop hidden">
+  <div id="sheet" class="sheet"></div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script src="msal-browser.min.js"></script>
+<script src="config.js"></script>
+<script src="auth.js"></script>
+<script src="graph.js"></script>
+<script src="db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
