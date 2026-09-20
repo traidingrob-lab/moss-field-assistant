@@ -103,12 +103,16 @@ const MossDB = (() => {
     projects: {
       all: () => getAll("projects"),
       get: (id) => get("projects", id),
-      add: (project) => put("projects", { status: "Active", ...project }),
+      add: (project) => put("projects", { status: "Active", ...project, updatedAt: new Date().toISOString() }),
       update: async (id, patch) => {
         const existing = await get("projects", id);
         if (!existing) return null;
-        return put("projects", { ...existing, ...patch });
-      }
+        return put("projects", { ...existing, ...patch, updatedAt: new Date().toISOString() });
+      },
+      // Writes a project record exactly as given, without stamping a new
+      // updatedAt — used when merging in a copy synced from another
+      // device via OneDrive, so its original edit time is preserved.
+      upsert: (project) => put("projects", project)
     },
     issues: {
       all: () => getAll("issues"),

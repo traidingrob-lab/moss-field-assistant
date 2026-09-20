@@ -4,7 +4,9 @@
 // that's already safe in MossDB/IndexedDB, only skip the OneDrive copy.
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+const MOSS_ROOT = "MOSS PROJECTS";
 const MOSS_ACTIVE_ROOT = "MOSS PROJECTS/01 ACTIVE PROJECTS";
+const PROJECTS_INDEX_PATH = `${MOSS_ROOT}/moss-index.json`;
 
 // Mirrors the folder structure already created under each project in
 // Phase 1. If you rename folders in OneDrive, update this list to match.
@@ -66,7 +68,13 @@ async function ensureFolder(path, token) {
   const segments = path.split("/");
   const name = segments.pop();
   const parentPath = segments.join("/");
-  await graphFetch(`/me/drive/root:/${graphPathEncode(parentPath)}:/children`, token, {
+  // A top-level folder (no parent segments, e.g. "MOSS PROJECTS" itself)
+  // has no colon-addressed parent path — Graph wants POST .../root/children
+  // for that case, not .../root:/:children (which 400s on the empty path).
+  const childrenUrl = parentPath
+    ? `/me/drive/root:/${graphPathEncode(parentPath)}:/children`
+    : `/me/drive/root/children`;
+  await graphFetch(childrenUrl, token, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -136,4 +144,44 @@ async function uploadToOneDrive(projectName, subfolder, fileName, blob, token) {
     }
     start = end;
   }
+}
+
+// ---------- Cross-device project list ----------
+// The project list itself (name, status, id) isn't a "capture", so it
+// doesn't live under a project's own folder — it's a single shared JSON
+// file at the root of MOSS PROJECTS, read and rewritten by whichever
+// device last touched a project. This is how the same project list shows
+// up whether you're on your phone or your laptop.
+
+// Returns the shared project list, or null if the file doesn't exist yet
+// (first run on this account) — callers treat that as "nothing to merge"
+// rather than an error.
+async function fetchProjectsIndex(token) {
+  const encodedPath = graphPathEncode(PROJECTS_INDEX_PATH);
+  const res = await fetch(`${GRAPH_BASE}/me/drive/root:/${encodedPath}:/content`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Graph ${res.status} fetching project index: ${body.slice(0, 200)}`);
+  }
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// Overwrites the shared project list with the full merged set. Always well
+// under the 4MB simple-upload limit, even at hundreds of projects.
+async function saveProjectsIndex(token, projects) {
+  await ensureFolder(MOSS_ROOT, token); // no-op if Phase 1 already created it
+  const encodedPath = graphPathEncode(PROJECTS_INDEX_PATH);
+  const blob = new Blob([JSON.stringify(projects, null, 2)], { type: "application/json" });
+  await graphFetch(`/me/drive/root:/${encodedPath}:/content`, token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: blob
+  });
 }

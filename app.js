@@ -105,6 +105,13 @@ window.addEventListener("DOMContentLoaded", async () => {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   }
+
+  // Best-effort — runs after the first paint so it never blocks startup,
+  // and re-renders only if it actually pulled in something new (a
+  // project created on another device, or a status change made there).
+  syncProjectsWithOneDrive().then((changed) => {
+    if (changed) render();
+  });
 });
 
 async function render() {
@@ -253,6 +260,59 @@ function wireNewProjectButton() {
   });
 }
 
+// ---------- Cross-device project sync ----------
+// The project list lives in IndexedDB per device (see db.js), but a
+// shared JSON file in OneDrive (graph.js's fetchProjectsIndex/
+// saveProjectsIndex) lets every device signed into the same account see
+// the same projects. This pulls the remote list, merges it with what's
+// local (last-write-wins per project via updatedAt), writes the merged
+// set back to both places, and reports whether anything actually changed
+// so callers know whether to re-render.
+let projectSyncInFlight = null;
+
+async function syncProjectsWithOneDrive() {
+  if (!msalConfigured()) return false;
+  if (projectSyncInFlight) return projectSyncInFlight;
+
+  projectSyncInFlight = (async () => {
+    await initMsal();
+    if (!msCurrentAccount()) return false;
+    const token = await msGetToken();
+    if (!token) return false;
+
+    const [local, remote] = await Promise.all([MossDB.projects.all(), fetchProjectsIndex(token)]);
+
+    const byId = new Map(local.map((p) => [p.id, p]));
+    let changed = false;
+    if (remote) {
+      for (const rp of remote) {
+        const lp = byId.get(rp.id);
+        if (!lp) {
+          byId.set(rp.id, rp); // a project created on another device
+          changed = true;
+        } else if (new Date(rp.updatedAt || 0) > new Date(lp.updatedAt || 0)) {
+          byId.set(rp.id, rp); // remote has a newer edit (status change, etc.)
+          changed = true;
+        }
+      }
+    }
+
+    const merged = [...byId.values()];
+    for (const p of merged) await MossDB.projects.upsert(p);
+    await saveProjectsIndex(token, merged);
+    return changed;
+  })();
+
+  try {
+    return await projectSyncInFlight;
+  } catch (err) {
+    console.error("Project sync failed", err);
+    return false;
+  } finally {
+    projectSyncInFlight = null;
+  }
+}
+
 async function openNewProjectSheet() {
   const existing = await MossDB.projects.all();
   const existingIds = new Set(existing.map((p) => p.id));
@@ -300,8 +360,9 @@ async function openNewProjectSheet() {
     render();
 
     // Best-effort: mirror the standard folder set into OneDrive so this
-    // project has somewhere for captures to sync to. Silent on failure —
-    // the project still works locally either way.
+    // project has somewhere for captures to sync to, and push the updated
+    // project list so it shows up on other devices too. Silent on
+    // failure — the project still works locally either way.
     if (msalConfigured() && msCurrentAccount()) {
       try {
         const token = await msGetToken();
@@ -309,6 +370,7 @@ async function openNewProjectSheet() {
       } catch (err) {
         console.error("Failed to create OneDrive folders for new project", err);
       }
+      syncProjectsWithOneDrive();
     }
   });
 }
@@ -488,6 +550,7 @@ async function renderDashboard(id) {
   $app.querySelector('[data-quick="issue"]').addEventListener("click", () => openIssueSheet(id));
   $app.querySelector("#toggle-project-status").addEventListener("click", async () => {
     await MossDB.projects.update(id, { status: completed ? "Active" : "Completed" });
+    syncProjectsWithOneDrive();
     toast(completed ? "Project reactivated" : "Project marked complete");
     renderDashboard(id);
   });
