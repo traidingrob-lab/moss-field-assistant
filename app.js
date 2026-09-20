@@ -112,6 +112,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   syncProjectsWithOneDrive().then((changed) => {
     if (changed) render();
   });
+  syncCapturesWithOneDrive().then((changed) => {
+    if (changed && currentRoute().name === "project") render();
+  });
 });
 
 async function render() {
@@ -313,6 +316,79 @@ async function syncProjectsWithOneDrive() {
   }
 }
 
+// Syncs only the TEXT that makes a capture describable to AI (a photo's
+// caption, a voice note's transcript) across devices — never the photo or
+// audio file itself, which is too heavy for a JSON index and already has
+// its own backup path (uploadToOneDrive, per capture, at the time it's
+// taken). A capture pulled in from another device that this device never
+// took locally becomes a text-only "stub": no thumbnail/audio to show
+// here, but Ask AI and the reports can still read what it says. Mirrors
+// syncProjectsWithOneDrive's shape.
+let captureSyncInFlight = null;
+
+async function syncCapturesWithOneDrive() {
+  if (!msalConfigured()) return false;
+  if (captureSyncInFlight) return captureSyncInFlight;
+
+  captureSyncInFlight = (async () => {
+    await initMsal();
+    if (!msCurrentAccount()) return false;
+    const token = await msGetToken();
+    if (!token) return false;
+
+    const [allLocal, remote] = await Promise.all([MossDB.captures.all(), fetchCapturesIndex(token)]);
+    // Scoped to photo/voice on purpose: those are the only capture types
+    // this app writes a caption/transcript onto. Material and inspection
+    // captures carry other fields (status, result, comments) that this
+    // lightweight text index doesn't carry — syncing those in as stubs
+    // would create records with those fields silently missing.
+    const local = allLocal.filter((c) => c.type === "photo" || c.type === "voice");
+    const byId = new Map(local.map((c) => [c.id, c]));
+    let changed = false;
+
+    if (remote) {
+      for (const rc of remote.filter((c) => c.type === "photo" || c.type === "voice")) {
+        const lc = byId.get(rc.id);
+        if (!lc) {
+          // A capture taken on another device — save what we can (text
+          // only; remoteOnly marks it so the UI doesn't try to show a
+          // photo/audio player that has nothing to play).
+          const stub = { ...rc, remoteOnly: true };
+          byId.set(rc.id, stub);
+          await MossDB.captures.upsert(stub);
+          changed = true;
+        } else {
+          // Already have this capture locally (maybe with the real file).
+          // Only ever fill in caption/transcript if this device doesn't
+          // have one yet — these are set once at capture time and never
+          // edited after, so there's no "newer wins" case to handle.
+          const patch = {};
+          if (rc.caption && !lc.caption) patch.caption = rc.caption;
+          if (rc.transcript && !lc.transcript) patch.transcript = rc.transcript;
+          if (Object.keys(patch).length) {
+            const updated = await MossDB.captures.update(lc.id, patch);
+            if (updated) byId.set(lc.id, updated);
+            changed = true;
+          }
+        }
+      }
+    }
+
+    const merged = [...byId.values()];
+    await saveCapturesIndex(token, merged);
+    return changed;
+  })();
+
+  try {
+    return await captureSyncInFlight;
+  } catch (err) {
+    console.error("Capture sync failed", err);
+    return false;
+  } finally {
+    captureSyncInFlight = null;
+  }
+}
+
 async function openNewProjectSheet() {
   const existing = await MossDB.projects.all();
   const existingIds = new Set(existing.map((p) => p.id));
@@ -502,7 +578,31 @@ async function renderDashboard(id) {
             ? photos
                 .slice(-4)
                 .reverse()
-                .map((p) => `<div class="thumb"><img src="${p.dataUrl}" alt=""></div>`)
+                .map((p) => {
+                  // A capture synced in from another device as text-only
+                  // (see syncCapturesWithOneDrive) has no dataUrl here —
+                  // there's no image to show, only whatever caption came
+                  // with it, so render that instead of a broken <img>.
+                  if (!p.dataUrl) {
+                    return `
+          <div class="thumb" style="display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; background:var(--bg-2, #F3F4F6);">
+            <span class="desc" style="font-size:11px; line-height:1.3;">${
+              p.caption ? escapeHtml(p.caption) : "Photo from another device"
+            }</span>
+          </div>`;
+                  }
+                  return `
+          <div class="thumb" title="${p.caption ? escapeHtml(p.caption) : ""}">
+            <img src="${p.dataUrl}" alt="${p.caption ? escapeHtml(p.caption) : ""}">
+            ${
+              p.caption
+                ? `<span class="desc" style="display:block; font-size:11px; margin-top:4px; line-height:1.3;">${escapeHtml(p.caption)}</span>`
+                : aiConfigured()
+                ? `<span class="desc" style="display:block; font-size:11px; margin-top:4px; opacity:.6;">Describing…</span>`
+                : ""
+            }
+          </div>`;
+                })
                 .join("")
             : `<div class="empty">No photos captured for this project yet.</div>`
         }
@@ -522,7 +622,16 @@ async function renderDashboard(id) {
                   (v) => `
           <div class="row" style="cursor:default; flex-direction:column; align-items:stretch; gap:8px;">
             <span class="desc">${escapeHtml(new Date(v.createdAt).toLocaleString())}</span>
-            <audio controls preload="none" style="width:100%; height:32px;" src="${v.dataUrl}"></audio>
+            ${
+              v.dataUrl
+                ? `<audio controls preload="none" style="width:100%; height:32px;" src="${v.dataUrl}"></audio>`
+                : `<span class="desc" style="opacity:.6;">Recorded on another device — audio not available here.</span>`
+            }
+            ${
+              v.transcript
+                ? `<span class="desc" style="font-style:italic;">"${escapeHtml(v.transcript)}"</span>`
+                : `<span class="desc" style="opacity:.6;">No transcript (speech-to-text wasn't available when this was recorded).</span>`
+            }
           </div>`
                 )
                 .join("")
@@ -634,6 +743,16 @@ async function buildAIContext() {
       const counts = {};
       for (const c of captures) counts[c.type] = (counts[c.type] || 0) + 1;
       lines.push(`- Captures on file: ${Object.entries(counts).map(([type, n]) => `${n} ${type}`).join(", ")}`);
+
+      // Anything we actually have text for (a photo caption from AI, a
+      // voice-note transcript) gets surfaced so Ask AI can answer
+      // questions about what's IN a capture, not just that it exists.
+      const described = captures.filter((c) => c.caption || c.transcript);
+      for (const c of described.slice(-15)) {
+        const when = new Date(c.createdAt).toLocaleDateString();
+        if (c.caption) lines.push(`- Photo (${when}): ${c.caption}`);
+        if (c.transcript) lines.push(`- Voice note (${when}): "${c.transcript}"`);
+      }
     }
 
     lines.push("");
@@ -732,6 +851,14 @@ async function renderSettings() {
           ${aiConfigured() ? `<button class="btn ghost" id="ai-key-clear" style="flex:none; padding:8px 14px; font-size:13px;">Clear</button>` : ""}
         </div>
       </div>
+      <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <span class="main"><span class="icon">🎙️</span> <span class="title">Voice note language</span><span class="desc">What language you dictate voice notes in, for transcription</span></span>
+        <select id="f-voice-lang" style="width:100%;">
+          ${VOICE_LANG_OPTIONS.map(
+            (o) => `<option value="${o.value}" ${voiceLangStored() === o.value ? "selected" : ""}>${o.label}</option>`
+          ).join("")}
+        </select>
+      </div>
       <div class="row"><span class="icon">💾</span><span class="main"><span class="title">Data storage</span><span class="desc">Stored locally on this device${account ? ", synced to OneDrive" : ""}</span></span></div>
     </div>
   `;
@@ -764,9 +891,54 @@ async function renderSettings() {
     toast("API key removed");
     renderSettings();
   });
+
+  document.getElementById("f-voice-lang").addEventListener("change", (e) => {
+    setVoiceLang(e.target.value);
+    toast("Voice note language saved");
+  });
 }
 
 // ---------- Quick capture ----------
+
+const VOICE_LANG_STORAGE = "moss_voice_lang";
+
+const VOICE_LANG_OPTIONS = [
+  { value: "", label: "Auto (match this device's language)" },
+  { value: "en-US", label: "English (US)" },
+  { value: "es-US", label: "Español (Estados Unidos)" },
+  { value: "es-419", label: "Español (Latinoamérica)" },
+  { value: "es-ES", label: "Español (España)" }
+];
+
+// The raw stored choice — "" means "unset", i.e. the Settings dropdown
+// should show "Auto", not a guessed language. Different from voiceLang()
+// below, which is what recording actually uses (it resolves "" down to
+// the device's language).
+function voiceLangStored() {
+  try {
+    return localStorage.getItem(VOICE_LANG_STORAGE) || "";
+  } catch {
+    return "";
+  }
+}
+
+// "" (unset) means "follow the device's own language" — the common case
+// and why voice transcription worked for English devices without any
+// setup. Only needs changing when someone dictates in a language their
+// device/browser isn't set to.
+function voiceLang() {
+  return voiceLangStored() || navigator.language || "en-US";
+}
+
+function setVoiceLang(lang) {
+  try {
+    if (lang) localStorage.setItem(VOICE_LANG_STORAGE, lang);
+    else localStorage.removeItem(VOICE_LANG_STORAGE);
+  } catch {
+    // Ignored, same as setAiKey — worst case it just falls back to the
+    // device language again next time.
+  }
+}
 
 function currentProjectId() {
   const route = currentRoute();
@@ -833,10 +1005,22 @@ function capturePhoto(projectId) {
     const file = input.files[0];
     if (!file) return;
     const dataUrl = await fileToDataUrl(file);
-    await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name });
+    const capture = await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name });
     toast("Photo saved");
     if (currentRoute().name === "project") render();
     syncCaptureToOneDrive(projectId, "photo", file, file.name || `photo-${Date.now()}.jpg`);
+
+    // Caption it in the background so Ask AI and the reports can describe
+    // what's in the photo later. Best-effort: no API key yet, or the call
+    // fails, and the photo is still saved fine — it just won't be
+    // describable by AI until a key is added or the next capture works.
+    if (aiConfigured()) {
+      captionPhoto(dataUrl)
+        .then((caption) => caption && MossDB.captures.update(capture.id, { caption }))
+        .then(() => { if (currentRoute().name === "project") render(); })
+        .then(() => syncCapturesWithOneDrive())
+        .catch((err) => console.warn("Photo captioning skipped:", err.message));
+    }
   });
   input.click();
 }
@@ -867,6 +1051,36 @@ async function captureVoice(projectId) {
     const chunks = [];
     recorder.addEventListener("dataavailable", (e) => chunks.push(e.data));
 
+    // Live speech-to-text runs alongside the recording, entirely in the
+    // browser (the Web Speech API) — free, no API call, no cost per note.
+    // So Ask AI can read what was said. Not every browser has this
+    // (notably iOS Safari) — when it's missing, the voice note still saves
+    // fine, it just won't have text Ask AI can read.
+    //
+    // Language: the Web Speech API can't auto-detect language mid-recording
+    // — one recognizer, one language, chosen up front. voiceLang() defaults
+    // to the device's own language setting (so it "just works" whichever
+    // language the phone/browser is in), but is overridable in Settings
+    // for anyone who dictates in a different language than their device UI.
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    let transcript = "";
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = voiceLang();
+      recognition.addEventListener("result", (e) => {
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          if (e.results[i].isFinal) transcript += e.results[i][0].transcript + " ";
+        }
+      });
+      // A recognition hiccup (e.g. a pause) shouldn't kill the recording —
+      // just stop transcribing; the audio keeps recording regardless.
+      recognition.addEventListener("error", () => {});
+      try { recognition.start(); } catch {}
+    }
+
     openSheet(`
       <h2>Voice note</h2>
       <div class="rec-indicator"><span class="dot"></span><span>Recording…</span></div>
@@ -881,6 +1095,7 @@ async function captureVoice(projectId) {
     const stop = (save) => {
       recorder.stop();
       stream.getTracks().forEach((t) => t.stop());
+      if (recognition) { try { recognition.stop(); } catch {} }
       closeSheet();
       if (!save) return;
       recorder.addEventListener("stop", async () => {
@@ -889,11 +1104,13 @@ async function captureVoice(projectId) {
         // iPhone, which is one of the target platforms.
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
         const dataUrl = await blobToDataUrl(blob);
-        await MossDB.captures.add({ projectId, type: "voice", dataUrl });
-        toast("Voice note saved");
+        const finalTranscript = transcript.trim() || null;
+        await MossDB.captures.add({ projectId, type: "voice", dataUrl, transcript: finalTranscript });
+        toast(finalTranscript ? "Voice note saved (transcribed)" : "Voice note saved");
         if (currentRoute().name === "project") render();
         const ext = (recorder.mimeType || "audio/webm").includes("mp4") ? "m4a" : "webm";
         syncCaptureToOneDrive(projectId, "voice", blob, `voice-${Date.now()}.${ext}`);
+        if (finalTranscript) syncCapturesWithOneDrive();
       });
     };
 
@@ -1007,8 +1224,29 @@ function wireCloseButton() {
 
 async function showNextSteps() {
   const issues = (await MossDB.issues.all()).filter((i) => i.status === "Open");
+
+  let aiSummary = "";
+  if (aiConfigured()) {
+    try {
+      const context = await buildAIContext();
+      aiSummary = await askClaude(
+        `You are a general contractor's assistant. Using ONLY the project data below, list the top ` +
+        `priority next steps across all active projects — the things most urgent or most likely to ` +
+        `block progress (open issues, anything time-sensitive mentioned in logs or notes). Keep it ` +
+        `short: a plain-text prioritized list, no markdown headers.\n\n${context}`
+      );
+    } catch (err) {
+      aiSummary = `⚠️ ${err.message}`;
+    }
+  }
+
   openSheet(`
     <h2>Next Steps</h2>
+    ${
+      aiSummary
+        ? `<div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">${escapeHtml(aiSummary)}</div>`
+        : ""
+    }
     <div class="card card-list">
       ${
         issues.length
@@ -1016,7 +1254,7 @@ async function showNextSteps() {
           : `<div class="row"><span class="empty">Nothing outstanding.</span></div>`
       }
     </div>
-    <p class="empty">This gets smarter once AI processing (Phase 3) can prioritize by inspection dates and blockers.</p>
+    ${!aiConfigured() ? `<p class="empty">Add a Claude API key in Settings for an AI-prioritized summary here.</p>` : ""}
     ${closeButton()}
   `);
   wireCloseButton();
@@ -1034,18 +1272,46 @@ async function showDailyReport() {
     if (todays.length || todaysIssues.length) {
       const summary = `${todaysIssues.length} new issue(s), ${todays.length} capture(s) today.`;
       lines.push(`<strong>${escapeHtml(p.name)}</strong>: ${summary}`);
-      // Persist so the project's own Daily Logs section (and future
-      // reports) actually have something to show — previously nothing
-      // ever wrote to the logs store, so that section stayed empty forever.
-      await MossDB.logs.add({ projectId: p.id, summary });
+      // One log entry per project per day — re-opening the report later
+      // the same day (after more captures) updates that same entry's
+      // count instead of piling up duplicate rows, which used to inflate
+      // both the Daily Logs list and the AI context sent to Ask AI.
+      const existingLogs = await MossDB.logs.forProject(p.id);
+      const todaysLog = existingLogs.find((l) => new Date(l.createdAt).toDateString() === today);
+      if (todaysLog) {
+        await MossDB.logs.update(todaysLog.id, { summary });
+      } else {
+        await MossDB.logs.add({ projectId: p.id, summary });
+      }
     }
   }
+
+  let narrative = "";
+  if (aiConfigured() && lines.length) {
+    try {
+      const context = await buildAIContext();
+      narrative = await askClaude(
+        `You are writing today's daily log narrative for a general contractor, using ONLY the project ` +
+        `data below. Write 2-4 short plain-professional sentences for each project that had activity ` +
+        `today (today is ${today}) — only mention projects with today's date in their captures/issues/logs.\n\n${context}`
+      );
+    } catch (err) {
+      narrative = `⚠️ ${err.message}`;
+    }
+  }
+
   openSheet(`
     <h2>Today's Daily Log</h2>
-    <div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6;">
-      ${lines.length ? lines.join("<br>") : "Nothing captured yet today."}
+    <div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">
+      ${narrative ? escapeHtml(narrative) : (lines.length ? lines.join("<br>") : "Nothing captured yet today.")}
     </div>
-    <p class="empty">A written narrative daily log comes with Phase 3's AI processing. ${lines.length ? "Saved to each project's Daily Logs." : ""}</p>
+    <p class="empty">${
+      !aiConfigured()
+        ? "Add a Claude API key in Settings for a written narrative log."
+        : lines.length
+        ? "Saved to each project's Daily Logs."
+        : ""
+    }</p>
     ${closeButton()}
   `);
   wireCloseButton();
@@ -1053,9 +1319,28 @@ async function showDailyReport() {
 }
 
 async function showWeeklyReport() {
+  let narrative = "";
+  if (aiConfigured()) {
+    try {
+      const context = await buildAIContext();
+      narrative = await askClaude(
+        `You are writing a weekly report for a general contractor, using ONLY the project data below ` +
+        `(issues, logs, and captures on file). For each active project, summarize: completed/recent ` +
+        `work, open issues or inspections, and a brief note on what's likely next. Be concise and ` +
+        `professional, plain text, no markdown headers.\n\n${context}`
+      );
+    } catch (err) {
+      narrative = `⚠️ ${err.message}`;
+    }
+  }
+
   openSheet(`
     <h2>Weekly Report</h2>
-    <p class="empty">Weekly summaries (completed work, inspections, change orders, next week's plan) generate once AI processing is connected — Phase 3.</p>
+    ${
+      narrative
+        ? `<div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">${escapeHtml(narrative)}</div>`
+        : `<p class="empty">Add a Claude API key in Settings to generate weekly reports (completed work, inspections, change orders, next week's plan).</p>`
+    }
     ${closeButton()}
   `);
   wireCloseButton();

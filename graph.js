@@ -7,6 +7,7 @@ const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const MOSS_ROOT = "MOSS PROJECTS";
 const MOSS_ACTIVE_ROOT = "MOSS PROJECTS/01 ACTIVE PROJECTS";
 const PROJECTS_INDEX_PATH = `${MOSS_ROOT}/moss-index.json`;
+const CAPTURES_INDEX_PATH = `${MOSS_ROOT}/moss-captures-index.json`;
 
 // Mirrors the folder structure already created under each project in
 // Phase 1. If you rename folders in OneDrive, update this list to match.
@@ -179,6 +180,56 @@ async function saveProjectsIndex(token, projects) {
   await ensureFolder(MOSS_ROOT, token); // no-op if Phase 1 already created it
   const encodedPath = graphPathEncode(PROJECTS_INDEX_PATH);
   const blob = new Blob([JSON.stringify(projects, null, 2)], { type: "application/json" });
+  await graphFetch(`/me/drive/root:/${encodedPath}:/content`, token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: blob
+  });
+}
+
+// ---------- Cross-device capture text (captions/transcripts) ----------
+// The captures themselves (photo/audio files) already reach OneDrive as
+// real files via uploadToOneDrive, per-project — that's plenty for backup,
+// but way too heavy to shuttle through a JSON index just so another device
+// can read a caption. So this index carries only the lightweight text: no
+// dataUrl. A device that pulls in a capture it didn't take locally gets a
+// text-only "stub" record (see MossDB.captures.upsert / app.js) — enough
+// for Ask AI and the reports to read, but with no photo/audio to display
+// until that device's own capture is used (or the real file is fetched
+// from OneDrive directly, which this does not do).
+
+async function fetchCapturesIndex(token) {
+  const encodedPath = graphPathEncode(CAPTURES_INDEX_PATH);
+  const res = await fetch(`${GRAPH_BASE}/me/drive/root:/${encodedPath}:/content`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Graph ${res.status} fetching captures index: ${body.slice(0, 200)}`);
+  }
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function saveCapturesIndex(token, captures) {
+  await ensureFolder(MOSS_ROOT, token);
+  const encodedPath = graphPathEncode(CAPTURES_INDEX_PATH);
+  // Strip dataUrl (and any other heavy fields) before it ever leaves this
+  // device — only the text that makes a capture describable travels.
+  const light = captures.map((c) => ({
+    id: c.id,
+    projectId: c.projectId,
+    type: c.type,
+    name: c.name || null,
+    createdAt: c.createdAt,
+    caption: c.caption || null,
+    transcript: c.transcript || null
+  }));
+  const blob = new Blob([JSON.stringify(light, null, 2)], { type: "application/json" });
   await graphFetch(`/me/drive/root:/${encodedPath}:/content`, token, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

@@ -126,18 +126,39 @@ const MossDB = (() => {
         })
     },
     captures: {
+      all: () => getAll("captures"),
       forProject: (projectId) => getByIndex("captures", "projectId", projectId),
       add: (capture) =>
         put("captures", {
           id: uid(),
           createdAt: new Date().toISOString(),
           ...capture
-        })
+        }),
+      // Patches a capture already saved — used to attach an AI-generated
+      // caption or voice transcript after the fact, without touching the
+      // original file data.
+      update: async (id, patch) => {
+        const existing = await get("captures", id);
+        if (!existing) return null;
+        return put("captures", { ...existing, ...patch });
+      },
+      // Writes a capture record exactly as given (keeping its id) —
+      // used when merging in a text-only record synced from another
+      // device via OneDrive's captures index. If a capture with this id
+      // already exists locally (the real one, with its dataUrl), this
+      // only ever fills in caption/transcript on top of it — see
+      // syncCapturesWithOneDrive in app.js, which decides what to pass.
+      upsert: (capture) => put("captures", capture)
     },
     logs: {
       forProject: (projectId) => getByIndex("logs", "projectId", projectId),
       add: (log) =>
-        put("logs", { id: uid(), createdAt: new Date().toISOString(), ...log })
+        put("logs", { id: uid(), createdAt: new Date().toISOString(), ...log }),
+      update: async (id, patch) => {
+        const existing = await get("logs", id);
+        if (!existing) return null;
+        return put("logs", { ...existing, ...patch });
+      }
     }
   };
 })();
