@@ -197,7 +197,7 @@ async function renderHome() {
     </div>
 
     <div>
-      <div class="section-label">Projects</div>
+      <div class="section-label">Projects <button class="link" data-action="new-project">+ Add</button></div>
       <div style="display:flex; flex-direction:column; gap:8px; margin-top:10px;">
         ${projects.map(projectRow).join("")}
       </div>
@@ -208,6 +208,7 @@ async function renderHome() {
   wireQuickCapture();
   wireHomeActions(allIssues);
   wireProjectLinks();
+  wireNewProjectButton();
 }
 
 function projectRow(p) {
@@ -226,6 +227,60 @@ function projectRow(p) {
 
 function wireProjectLinks() {
   // links are plain <a href="#/..."> — router picks up hashchange automatically
+}
+
+function wireNewProjectButton() {
+  $app.querySelectorAll('[data-action="new-project"]').forEach((btn) => {
+    btn.addEventListener("click", () => openNewProjectSheet());
+  });
+}
+
+async function openNewProjectSheet() {
+  const existing = await MossDB.projects.all();
+  const existingIds = new Set(existing.map((p) => p.id));
+
+  openSheet(`
+    <h2>New Project</h2>
+    <div class="field">
+      <label>Project name</label>
+      <input id="f-name" placeholder='e.g. "Thompson Residence"'>
+    </div>
+    <div class="field">
+      <label>Address / description</label>
+      <input id="f-address" placeholder='e.g. "412 Maple St · Kitchen remodel"'>
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="cancel">Cancel</button>
+      <button class="btn primary" id="save">Create Project</button>
+    </div>
+  `);
+  document.getElementById("cancel").addEventListener("click", closeSheet);
+  document.getElementById("save").addEventListener("click", async () => {
+    const name = document.getElementById("f-name").value.trim();
+    if (!name) {
+      toast("Give the project a name");
+      return;
+    }
+    const address = document.getElementById("f-address").value.trim();
+
+    // Slugify the name into an id, deduping against existing projects so
+    // two "Smith" projects don't collide and silently overwrite each other.
+    let base = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") || "project";
+    let id = base;
+    let n = 2;
+    while (existingIds.has(id)) {
+      id = `${base}-${n}`;
+      n++;
+    }
+
+    await MossDB.projects.add({ id, name, address });
+    closeSheet();
+    toast("Project created");
+    render();
+  });
 }
 
 function wireHomeActions(allIssues) {
@@ -247,7 +302,10 @@ async function renderProjectsList() {
   const projects = await MossDB.projects.all();
   const header = `
     <div class="topbar">
-      <div class="project-head"><div class="title" style="font-size:20px;">Projects</div></div>
+      <div class="project-head">
+        <div class="title" style="font-size:20px;">Projects</div>
+        <button class="btn primary" style="flex:none; padding:8px 14px; font-size:13px;" data-action="new-project">+ Add Project</button>
+      </div>
     </div>
   `;
   const body = `
@@ -256,6 +314,7 @@ async function renderProjectsList() {
     </div>
   `;
   shell({ header, body, activeTab: "projects" });
+  wireNewProjectButton();
 }
 
 // ---------- Project dashboard ----------

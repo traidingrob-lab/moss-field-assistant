@@ -102,7 +102,8 @@ const MossDB = (() => {
     seedIfEmpty,
     projects: {
       all: () => getAll("projects"),
-      get: (id) => get("projects", id)
+      get: (id) => get("projects", id),
+      add: (project) => put("projects", project)
     },
     issues: {
       all: () => getAll("issues"),
