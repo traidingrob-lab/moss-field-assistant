@@ -11,9 +11,9 @@ const CACHE = "moss-cache-v2";
 const SHELL_ASSETS = [
   "./",
   "./index.html",
-  "./css/style.css",
-  "./js/app.js",
-  "./js/db.js",
+  "./style.css",
+  "./app.js",
+  "./db.js",
   "./manifest.json"
 ];
 
