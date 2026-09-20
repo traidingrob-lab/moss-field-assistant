@@ -29,7 +29,7 @@
   style-src 'self' 'unsafe-inline';
   img-src 'self' data:;
   font-src 'self';
-  connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com https://*.microsoftpersonalcontent.com;
+  connect-src 'self' https://graph.microsoft.com https://login.microsoftonline.com https://*.microsoftpersonalcontent.com https://api.anthropic.com;
   frame-src https://login.microsoftonline.com;
   media-src 'self' data: blob:;
   object-src 'none';
@@ -55,6 +55,7 @@
 <script src="config.js"></script>
 <script src="auth.js"></script>
 <script src="graph.js"></script>
+<script src="ai.js"></script>
 <script src="db.js"></script>
 <script src="app.js"></script>
 </body>

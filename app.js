@@ -601,9 +601,49 @@ async function renderAllIssues() {
   shell({ header, body, activeTab: "home" });
 }
 
-// ---------- Ask AI (placeholder for Phase 3) ----------
+// ---------- Ask AI ----------
+
+// Builds a compact text summary of everything MossDB knows — projects,
+// open/closed issues, daily log summaries, and capture counts — for
+// Claude to answer questions against. Capture content itself (photo/voice
+// data URLs) is deliberately left out: it would blow past a reasonable
+// prompt size fast, and nothing here reads photos or transcribes audio
+// yet, so including the raw data would just be noise Claude can't use.
+async function buildAIContext() {
+  const projects = await MossDB.projects.all();
+  const allIssues = await MossDB.issues.all();
+  const lines = [];
+
+  for (const p of projects) {
+    lines.push(`## ${p.name} (${p.status || "Active"})${p.address ? ` — ${p.address}` : ""}`);
+
+    const issues = allIssues.filter((i) => i.projectId === p.id);
+    if (issues.length) {
+      for (const i of issues) {
+        lines.push(`- Issue [${i.status}] (${i.trade}): ${i.title}${i.requirement ? ` — ${i.requirement}` : ""}`);
+      }
+    }
+
+    const logs = await MossDB.logs.forProject(p.id);
+    for (const l of logs.slice(-10)) {
+      lines.push(`- Log (${new Date(l.createdAt).toLocaleDateString()}): ${l.summary}`);
+    }
+
+    const captures = await MossDB.captures.forProject(p.id);
+    if (captures.length) {
+      const counts = {};
+      for (const c of captures) counts[c.type] = (counts[c.type] || 0) + 1;
+      lines.push(`- Captures on file: ${Object.entries(counts).map(([type, n]) => `${n} ${type}`).join(", ")}`);
+    }
+
+    lines.push("");
+  }
+
+  return lines.join("\n") || "No projects yet.";
+}
 
 async function renderAsk() {
+  const configured = aiConfigured();
   const header = `
     <div class="topbar">
       <div class="project-head"><div class="title" style="font-size:20px;">Ask AI</div></div>
@@ -611,17 +651,47 @@ async function renderAsk() {
   `;
   const body = `
     <div class="card" style="padding:16px;">
-      <div class="field">
-        <label>Ask about any project</label>
-        <textarea id="ask-input" placeholder='e.g. "What is still open at Helm?"'></textarea>
-      </div>
-      <button class="btn primary" id="ask-submit" style="margin-top:12px; width:100%;">Ask</button>
-      <p class="empty" style="margin-top:12px;">The AI layer connects in Phase 3 — this will search everything captured here and in OneDrive once it's wired up. For now, try "Open Issues" from the home screen to see live local data.</p>
+      ${
+        configured
+          ? `
+        <div class="field">
+          <label>Ask about any project</label>
+          <textarea id="ask-input" placeholder='e.g. "What is still open at Helm?"'></textarea>
+        </div>
+        <button class="btn primary" id="ask-submit" style="margin-top:12px; width:100%;">Ask</button>
+        <div id="ask-answer" style="margin-top:14px; font-size:14px; line-height:1.6; white-space:pre-wrap;"></div>
+      `
+          : `<p class="empty">Add a Claude API key in Settings to turn this on.</p>`
+      }
     </div>
   `;
   shell({ header, body, activeTab: "ask" });
-  document.getElementById("ask-submit").addEventListener("click", () => {
-    toast("AI search comes online in Phase 3");
+  if (!configured) return;
+
+  const $input = document.getElementById("ask-input");
+  const $submit = document.getElementById("ask-submit");
+  const $answer = document.getElementById("ask-answer");
+
+  $submit.addEventListener("click", async () => {
+    const question = $input.value.trim();
+    if (!question) {
+      toast("Type a question first");
+      return;
+    }
+    $submit.disabled = true;
+    $submit.textContent = "Asking…";
+    $answer.textContent = "";
+    try {
+      const context = await buildAIContext();
+      const prompt = `You are answering questions about active construction projects for a general contractor, using ONLY the project data below. If the data doesn't answer the question, say so plainly instead of guessing.\n\n${context}\n\nQuestion: ${question}`;
+      const answer = await askClaude(prompt);
+      $answer.textContent = answer || "(No answer returned.)";
+    } catch (err) {
+      $answer.textContent = `⚠️ ${err.message}`;
+    } finally {
+      $submit.disabled = false;
+      $submit.textContent = "Ask";
+    }
   });
 }
 
@@ -654,7 +724,14 @@ async function renderSettings() {
             : ""
         }
       </div>
-      <div class="row"><span class="icon">🤖</span><span class="main"><span class="title">AI processing</span><span class="desc">Not connected yet — Phase 3</span></span></div>
+      <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <span class="main"><span class="icon">🤖</span> <span class="title">AI processing</span><span class="desc">${aiConfigured() ? "Claude API key saved on this device" : "Add a Claude API key to turn on Ask AI"}</span></span>
+        <div style="display:flex; gap:8px;">
+          <input id="f-ai-key" type="password" placeholder="sk-ant-..." style="flex:1;" value="${aiConfigured() ? "••••••••••••••••" : ""}">
+          <button class="btn primary" id="ai-key-save" style="flex:none; padding:8px 14px; font-size:13px;">Save</button>
+          ${aiConfigured() ? `<button class="btn ghost" id="ai-key-clear" style="flex:none; padding:8px 14px; font-size:13px;">Clear</button>` : ""}
+        </div>
+      </div>
       <div class="row"><span class="icon">💾</span><span class="main"><span class="title">Data storage</span><span class="desc">Stored locally on this device${account ? ", synced to OneDrive" : ""}</span></span></div>
     </div>
   `;
@@ -667,6 +744,26 @@ async function renderSettings() {
       else await msSignIn();
     });
   }
+
+  const $aiKeyInput = document.getElementById("f-ai-key");
+  document.getElementById("ai-key-save").addEventListener("click", () => {
+    const value = $aiKeyInput.value.trim();
+    // The placeholder dots stand in for an already-saved key — clicking
+    // Save without touching the field would otherwise overwrite the real
+    // key with literal bullet characters.
+    if (!value || value.startsWith("••")) {
+      toast("Paste your API key first");
+      return;
+    }
+    setAiKey(value);
+    toast("API key saved");
+    renderSettings();
+  });
+  document.getElementById("ai-key-clear")?.addEventListener("click", () => {
+    setAiKey("");
+    toast("API key removed");
+    renderSettings();
+  });
 }
 
 // ---------- Quick capture ----------
