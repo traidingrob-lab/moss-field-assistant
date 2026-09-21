@@ -6,6 +6,7 @@
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const MOSS_ROOT = "MOSS PROJECTS";
 const MOSS_ACTIVE_ROOT = "MOSS PROJECTS/01 ACTIVE PROJECTS";
+const MOSS_TRASH_ROOT = "MOSS PROJECTS/99 TRASH";
 const PROJECTS_INDEX_PATH = `${MOSS_ROOT}/moss-index.json`;
 const CAPTURES_INDEX_PATH = `${MOSS_ROOT}/moss-captures-index.json`;
 
@@ -64,6 +65,19 @@ async function folderExists(path, token) {
   }
 }
 
+// Like folderExists, but returns the item's own Graph metadata (notably
+// its `id`) instead of a bare true/false — needed for anything that has to
+// address the item by id rather than by path, such as moving it (see
+// moveProjectToTrash). Returns null if it doesn't exist.
+async function folderMeta(path, token) {
+  try {
+    const res = await graphFetch(`/me/drive/root:/${graphPathEncode(path)}`, token);
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 async function ensureFolder(path, token) {
   if (await folderExists(path, token)) return;
   const segments = path.split("/");
@@ -99,6 +113,37 @@ async function ensureProjectFolders(projectName, token) {
       await ensureFolder(`${base}/${parts.slice(0, i).join("/")}`, token);
     }
   }
+}
+
+// Moves a deleted project's whole OneDrive folder into "MOSS PROJECTS/99
+// TRASH" instead of leaving it sitting in 01 ACTIVE PROJECTS forever, or
+// actually deleting it. Nothing inside is touched — same photos, voice
+// notes, documents, just relocated.
+//
+// Graph's move is a PATCH on the item's id (not its path) with the new
+// parent folder given by id too — see
+// https://learn.microsoft.com/en-us/graph/api/driveitem-move — so this
+// has to look up both folders' ids first via folderMeta.
+async function moveProjectToTrash(projectName, token) {
+  const sourcePath = projectFolderPath(projectName);
+  const source = await folderMeta(sourcePath, token);
+  if (!source) return; // no OneDrive folder for this project — nothing to move
+
+  await ensureFolder(MOSS_TRASH_ROOT, token);
+  const trash = await folderMeta(MOSS_TRASH_ROOT, token);
+  if (!trash) throw new Error("Couldn't find/create the OneDrive Trash folder");
+
+  // Timestamped so deleting, recreating, and deleting the same project
+  // name again doesn't collide with what's already sitting in Trash.
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  await graphFetch(`/me/drive/items/${source.id}`, token, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      parentReference: { id: trash.id },
+      name: `${projectName.toUpperCase()} (deleted ${stamp})`
+    })
+  });
 }
 
 // Uploads a Blob/File into a project's subfolder. Handles both the
@@ -194,9 +239,9 @@ async function saveProjectsIndex(token, projects) {
 // can read a caption. So this index carries only the lightweight text: no
 // dataUrl. A device that pulls in a capture it didn't take locally gets a
 // text-only "stub" record (see MossDB.captures.upsert / app.js) — enough
-// for Ask AI and the reports to read, but with no photo/audio to display
-// until that device's own capture is used (or the real file is fetched
-// from OneDrive directly, which this does not do).
+// for Ask AI and the reports to read right away. The actual photo/audio
+// for a stub can be fetched afterward on demand (downloadCaptureFile,
+// below, via hydrateRemoteCapture in app.js) using its remoteFileName.
 
 async function fetchCapturesIndex(token) {
   const encodedPath = graphPathEncode(CAPTURES_INDEX_PATH);
@@ -219,7 +264,11 @@ async function saveCapturesIndex(token, captures) {
   await ensureFolder(MOSS_ROOT, token);
   const encodedPath = graphPathEncode(CAPTURES_INDEX_PATH);
   // Strip dataUrl (and any other heavy fields) before it ever leaves this
-  // device — only the text that makes a capture describable travels.
+  // device — only the text that makes a capture describable travels, plus
+  // remoteFileName (just a short string — the name the real file was
+  // already uploaded under via uploadToOneDrive), which is what lets
+  // another device fetch that real file on demand later. See
+  // hydrateRemoteCapture in app.js.
   const light = captures.map((c) => ({
     id: c.id,
     projectId: c.projectId,
@@ -227,7 +276,8 @@ async function saveCapturesIndex(token, captures) {
     name: c.name || null,
     createdAt: c.createdAt,
     caption: c.caption || null,
-    transcript: c.transcript || null
+    transcript: c.transcript || null,
+    remoteFileName: c.remoteFileName || null
   }));
   const blob = new Blob([JSON.stringify(light, null, 2)], { type: "application/json" });
   await graphFetch(`/me/drive/root:/${encodedPath}:/content`, token, {
@@ -235,4 +285,15 @@ async function saveCapturesIndex(token, captures) {
     headers: { "Content-Type": "application/json" },
     body: blob
   });
+}
+
+// Downloads the actual capture file (a photo or a voice note) from
+// OneDrive — used to "hydrate" a text-only stub pulled in from another
+// device (see hydrateRemoteCapture in app.js) into something you can
+// actually see/hear here, not just a caption/transcript.
+async function downloadCaptureFile(projectName, subfolder, fileName, token) {
+  const path = `${projectFolderPath(projectName)}/${subfolder}/${fileName}`;
+  const encodedPath = graphPathEncode(path);
+  const res = await graphFetch(`/me/drive/root:/${encodedPath}:/content`, token);
+  return res.blob();
 }

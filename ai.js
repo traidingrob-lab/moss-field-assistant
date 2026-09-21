@@ -1,4 +1,5 @@
-// Client-side calls to the Claude API for "Ask AI" (Phase 3).
+// Client-side calls to the Claude API for AI features (Phase 3): "Ask AI",
+// photo captioning, and the AI-written report narratives.
 //
 // This app is a static site with no backend server, so there's nowhere to
 // keep an API key secret the way a normal web app would. Instead, the key
@@ -39,9 +40,10 @@ function setAiKey(key) {
   }
 }
 
-// Sends one question to Claude along with whatever project context the
-// caller built, and returns the plain-text answer.
-async function askClaude(prompt) {
+// Shared low-level call. `content` is either a plain string (text-only) or
+// an array of Claude content blocks (e.g. an image block + a text block),
+// per the Messages API.
+async function callClaude(content, maxTokens = 1024) {
   const key = aiKey();
   if (!key) throw new Error("No Claude API key set — add one in Settings first.");
 
@@ -55,8 +57,8 @@ async function askClaude(prompt) {
     },
     body: JSON.stringify({
       model: AI_MODEL,
-      max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }]
+      max_tokens: maxTokens,
+      messages: [{ role: "user", content }]
     })
   });
 
@@ -74,4 +76,36 @@ async function askClaude(prompt) {
 
   const data = await res.json();
   return (data.content || []).map((block) => block.text || "").join("").trim();
+}
+
+// Sends one question to Claude along with whatever project context the
+// caller built, and returns the plain-text answer.
+async function askClaude(prompt) {
+  return callClaude(prompt);
+}
+
+// Describes a photo in one short sentence, so Ask AI and the reports can
+// later answer questions about what's IN a photo using only that saved
+// text — without re-sending the image (cheaper, and it still works if the
+// image is later cleared to save space). Called once, right after a photo
+// is captured.
+//
+// NOTE: unlike text questions, this costs one small API call per photo —
+// only fires when an API key is present (aiConfigured()), and failures are
+// swallowed by the caller so a captioning problem never blocks saving the
+// photo itself.
+async function captionPhoto(dataUrl) {
+  const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || "");
+  if (!match) throw new Error("Invalid image data.");
+  const [, mediaType, base64Data] = match;
+  const prompt =
+    "Describe this construction job-site photo in one short, specific sentence for a daily log " +
+    "(what's shown and its apparent stage/condition — no generic filler like \"a photo of a room\").";
+  return callClaude(
+    [
+      { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
+      { type: "text", text: prompt }
+    ],
+    150
+  );
 }
