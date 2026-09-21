@@ -389,6 +389,33 @@ async function syncCapturesWithOneDrive() {
   }
 }
 
+// Fetches the real photo/audio file for a text-only stub (one pulled in by
+// syncCapturesWithOneDrive from another device) straight from OneDrive,
+// using the exact filename it was uploaded under (remoteFileName), and
+// saves it into this device's own copy of the record — so it only ever
+// needs fetching once per device. Silently gives up if OneDrive isn't
+// connected, the file was never actually uploaded, etc.: the caption/
+// transcript text is still there either way, this only adds the media.
+const hydrateAttempted = new Set();
+
+async function hydrateRemoteCapture(capture) {
+  if (!capture.remoteFileName || !msalConfigured()) return null;
+  try {
+    await initMsal();
+    if (!msCurrentAccount()) return null;
+    const token = await msGetToken();
+    if (!token) return null;
+    const project = await MossDB.projects.get(capture.projectId);
+    if (!project) return null;
+    const blob = await downloadCaptureFile(project.name, syncSubfolderFor(capture.type), capture.remoteFileName, token);
+    const dataUrl = await blobToDataUrl(blob);
+    return await MossDB.captures.update(capture.id, { dataUrl });
+  } catch (err) {
+    console.warn("Couldn't fetch capture file from OneDrive:", err.message);
+    return null;
+  }
+}
+
 async function openNewProjectSheet() {
   const existing = await MossDB.projects.all();
   const existingIds = new Set(existing.map((p) => p.id));
@@ -513,6 +540,27 @@ async function renderDashboard(id) {
   const captures = await MossDB.captures.forProject(id);
   const openIssues = issues.filter((i) => i.status === "Open");
   const photos = captures.filter((c) => c.type === "photo");
+
+  // Any capture on this project that's still a text-only stub from another
+  // device (has a caption/transcript but no dataUrl) gets its real photo/
+  // audio fetched from OneDrive in the background, once per device — see
+  // hydrateRemoteCapture. Re-renders this same screen when one lands.
+  for (const c of captures) {
+    if (!c.dataUrl && c.remoteFileName && !hydrateAttempted.has(c.id)) {
+      hydrateAttempted.add(c.id);
+      hydrateRemoteCapture(c).then((updated) => {
+        if (updated && currentRoute().name === "project" && currentRoute().id === id) {
+          render();
+        } else if (!updated) {
+          // Didn't work this time (maybe the source device hadn't finished
+          // uploading yet, maybe a network hiccup) — un-mark it so the
+          // next time this screen opens, it gets another try instead of
+          // being stuck "unavailable" for the rest of the session.
+          hydrateAttempted.delete(c.id);
+        }
+      });
+    }
+  }
   const initials = escapeHtml(project.name.slice(0, 2).toUpperCase());
   const completed = !isActiveProject(project);
 
@@ -1005,10 +1053,20 @@ function capturePhoto(projectId) {
     const file = input.files[0];
     if (!file) return;
     const dataUrl = await fileToDataUrl(file);
-    const capture = await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name });
+    // Recorded once and reused for both the OneDrive upload and the local
+    // record, so another device can later ask OneDrive for this exact file
+    // by name (see hydrateRemoteCapture) — relying on file.name alone
+    // wasn't reliable enough to build a re-download path from.
+    const remoteFileName = file.name || `photo-${Date.now()}.jpg`;
+    const capture = await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name, remoteFileName });
     toast("Photo saved");
     if (currentRoute().name === "project") render();
-    syncCaptureToOneDrive(projectId, "photo", file, file.name || `photo-${Date.now()}.jpg`);
+    // Kept so the captions chain below can wait for the real file to
+    // actually finish reaching OneDrive before telling OTHER devices this
+    // remoteFileName exists — pushing the captures index first would let
+    // another device try to hydrate a file that isn't there yet (and
+    // hydrateRemoteCapture doesn't retry a failed fetch until next visit).
+    const uploadPromise = syncCaptureToOneDrive(projectId, "photo", file, remoteFileName);
 
     // Caption it in the background so Ask AI and the reports can describe
     // what's in the photo later. Best-effort: no API key yet, or the call
@@ -1018,6 +1076,7 @@ function capturePhoto(projectId) {
       captionPhoto(dataUrl)
         .then((caption) => caption && MossDB.captures.update(capture.id, { caption }))
         .then(() => { if (currentRoute().name === "project") render(); })
+        .then(() => uploadPromise)
         .then(() => syncCapturesWithOneDrive())
         .catch((err) => console.warn("Photo captioning skipped:", err.message));
     }
@@ -1105,12 +1164,19 @@ async function captureVoice(projectId) {
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
         const dataUrl = await blobToDataUrl(blob);
         const finalTranscript = transcript.trim() || null;
-        await MossDB.captures.add({ projectId, type: "voice", dataUrl, transcript: finalTranscript });
+        // Same reasoning as the photo path: fix the filename once and
+        // store it, so another device can re-download this exact file
+        // from OneDrive later (hydrateRemoteCapture).
+        const ext = (recorder.mimeType || "audio/webm").includes("mp4") ? "m4a" : "webm";
+        const remoteFileName = `voice-${Date.now()}.${ext}`;
+        await MossDB.captures.add({ projectId, type: "voice", dataUrl, transcript: finalTranscript, remoteFileName });
         toast(finalTranscript ? "Voice note saved (transcribed)" : "Voice note saved");
         if (currentRoute().name === "project") render();
-        const ext = (recorder.mimeType || "audio/webm").includes("mp4") ? "m4a" : "webm";
-        syncCaptureToOneDrive(projectId, "voice", blob, `voice-${Date.now()}.${ext}`);
-        if (finalTranscript) syncCapturesWithOneDrive();
+        // Same ordering reason as capturePhoto: don't advertise this
+        // remoteFileName to other devices until the real file has actually
+        // finished uploading.
+        const uploadPromise = syncCaptureToOneDrive(projectId, "voice", blob, remoteFileName);
+        if (finalTranscript) uploadPromise.then(() => syncCapturesWithOneDrive());
       });
     };
 
