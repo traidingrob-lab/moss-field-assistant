@@ -473,6 +473,23 @@ function confirmDeleteProject(project) {
   });
 }
 
+// Full-size photo view — tapping a thumbnail in Recent Captures opens this
+// instead of leaving the picture squeezed into a small grid tile.
+function openPhotoViewer(photo) {
+  openSheet(`
+    <div class="photo-viewer">
+      <img src="${photo.dataUrl}" alt="${photo.caption ? escapeHtml(photo.caption) : ""}">
+      ${
+        photo.caption
+          ? `<p class="empty" style="text-align:left; margin-top:10px;">${escapeHtml(photo.caption)}</p>`
+          : ""
+      }
+    </div>
+    ${closeButton()}
+  `);
+  wireCloseButton();
+}
+
 async function openNewProjectSheet() {
   const existing = await MossDB.projects.all();
   const existingIds = new Set(existing.map((p) => p.id));
@@ -687,23 +704,25 @@ async function renderDashboard(id) {
                   // A capture synced in from another device as text-only
                   // (see syncCapturesWithOneDrive) has no dataUrl here —
                   // there's no image to show, only whatever caption came
-                  // with it, so render that instead of a broken <img>.
+                  // with it, so render that instead of a broken <img>, and
+                  // skip making it clickable (nothing to enlarge yet).
                   if (!p.dataUrl) {
                     return `
-          <div class="thumb" style="display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; background:var(--bg-2, #F3F4F6);">
-            <span class="desc" style="font-size:11px; line-height:1.3;">${
-              p.caption ? escapeHtml(p.caption) : "Photo from another device"
-            }</span>
+          <div class="thumb">
+            <div class="thumb-img" style="display:flex; align-items:center; justify-content:center; text-align:center; padding:8px;">
+              <span class="desc" style="font-size:11px; line-height:1.3;">Photo from another device</span>
+            </div>
+            ${p.caption ? `<span class="desc" style="font-size:12px; line-height:1.35;">${escapeHtml(p.caption)}</span>` : ""}
           </div>`;
                   }
                   return `
-          <div class="thumb" title="${p.caption ? escapeHtml(p.caption) : ""}">
-            <img src="${p.dataUrl}" alt="${p.caption ? escapeHtml(p.caption) : ""}">
+          <div class="thumb clickable" data-photo-id="${p.id}">
+            <div class="thumb-img"><img src="${p.dataUrl}" alt="${p.caption ? escapeHtml(p.caption) : ""}"></div>
             ${
               p.caption
-                ? `<span class="desc" style="display:block; font-size:11px; margin-top:4px; line-height:1.3;">${escapeHtml(p.caption)}</span>`
+                ? `<span class="desc" style="font-size:12px; line-height:1.35;">${escapeHtml(p.caption)}</span>`
                 : aiConfigured()
-                ? `<span class="desc" style="display:block; font-size:11px; margin-top:4px; opacity:.6;">Describing…</span>`
+                ? `<span class="desc" style="font-size:12px; opacity:.6;">Describing…</span>`
                 : ""
             }
           </div>`;
@@ -776,6 +795,12 @@ async function renderDashboard(id) {
     renderDashboard(id);
   });
   $app.querySelector("#delete-project").addEventListener("click", () => confirmDeleteProject(project));
+  $app.querySelectorAll("[data-photo-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const photo = photos.find((p) => p.id === el.dataset.photoId);
+      if (photo) openPhotoViewer(photo);
+    });
+  });
 
   const logs = await MossDB.logs.forProject(id);
   const $logList = document.getElementById("log-list");
@@ -1133,6 +1158,13 @@ function capturePhoto(projectId) {
     // another device try to hydrate a file that isn't there yet (and
     // hydrateRemoteCapture doesn't retry a failed fetch until next visit).
     const uploadPromise = syncCaptureToOneDrive(projectId, "photo", file, remoteFileName);
+    // Regardless of whether AI captioning is on, push the captures index
+    // once the real file has finished reaching OneDrive — this is what
+    // tells OTHER devices this photo exists at all (remoteFileName, so
+    // they can hydrate it later). Without this, a photo taken with no API
+    // key configured would silently stay invisible on other devices until
+    // this device's app happened to reload and re-sync on its own.
+    uploadPromise.then(() => syncCapturesWithOneDrive());
 
     // Caption it in the background so Ask AI and the reports can describe
     // what's in the photo later. Best-effort: no API key yet, or the call
@@ -1242,7 +1274,12 @@ async function captureVoice(projectId) {
         // remoteFileName to other devices until the real file has actually
         // finished uploading.
         const uploadPromise = syncCaptureToOneDrive(projectId, "voice", blob, remoteFileName);
-        if (finalTranscript) uploadPromise.then(() => syncCapturesWithOneDrive());
+        // Push the captures index once the real file is up, whether or not
+        // this note got a transcript (no Web Speech API on this browser,
+        // or nothing recognized) — same reasoning as capturePhoto above:
+        // otherwise this voice note stays invisible to other devices until
+        // this device's app happens to reload.
+        uploadPromise.then(() => syncCapturesWithOneDrive());
       });
     };
 
