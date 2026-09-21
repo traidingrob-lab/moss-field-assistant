@@ -1158,26 +1158,24 @@ function capturePhoto(projectId) {
     // another device try to hydrate a file that isn't there yet (and
     // hydrateRemoteCapture doesn't retry a failed fetch until next visit).
     const uploadPromise = syncCaptureToOneDrive(projectId, "photo", file, remoteFileName);
-    // Regardless of whether AI captioning is on, push the captures index
-    // once the real file has finished reaching OneDrive — this is what
-    // tells OTHER devices this photo exists at all (remoteFileName, so
-    // they can hydrate it later). Without this, a photo taken with no API
-    // key configured would silently stay invisible on other devices until
-    // this device's app happened to reload and re-sync on its own.
-    uploadPromise.then(() => syncCapturesWithOneDrive());
 
-    // Caption it in the background so Ask AI and the reports can describe
-    // what's in the photo later. Best-effort: no API key yet, or the call
-    // fails, and the photo is still saved fine — it just won't be
-    // describable by AI until a key is added or the next capture works.
-    if (aiConfigured()) {
-      captionPhoto(dataUrl)
-        .then((caption) => caption && MossDB.captures.update(capture.id, { caption }))
-        .then(() => { if (currentRoute().name === "project") render(); })
-        .then(() => uploadPromise)
-        .then(() => syncCapturesWithOneDrive())
-        .catch((err) => console.warn("Photo captioning skipped:", err.message));
-    }
+    // Push the captures index exactly once, after the real file has
+    // finished reaching OneDrive AND (if AI is on) after captioning has
+    // had its chance to finish too — so other devices learn about this
+    // photo (remoteFileName, so they can hydrate it) with its caption
+    // already attached when there is one, and so a photo taken with no
+    // API key configured doesn't stay invisible on other devices until
+    // this device's app happens to reload. captionPhoto's own failure is
+    // swallowed here (logged, not rethrown) so a captioning error never
+    // skips announcing the photo itself.
+    const captionPromise = aiConfigured()
+      ? captionPhoto(dataUrl)
+          .then((caption) => caption && MossDB.captures.update(capture.id, { caption }))
+          .then(() => { if (currentRoute().name === "project") render(); })
+          .catch((err) => console.warn("Photo captioning skipped:", err.message))
+      : Promise.resolve();
+
+    Promise.all([uploadPromise, captionPromise]).then(() => syncCapturesWithOneDrive());
   });
   input.click();
 }
