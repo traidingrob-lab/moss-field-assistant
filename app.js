@@ -163,10 +163,24 @@ function isActiveProject(p) {
   return p.status !== "Completed";
 }
 
+// Deleting a project doesn't erase its row — it flags it (a "tombstone"),
+// the same way OneDrive sync already treats any edit: whichever device
+// touched it last (via updatedAt) wins once synced. A real delete would
+// otherwise just get silently undone next sync, by the other device's
+// copy still being there and looking like "a project created elsewhere".
+// isVisibleProject is what every screen filters through so a deleted
+// project actually disappears everywhere despite still existing in
+// IndexedDB (and, deliberately, in the OneDrive files themselves — see
+// deleteProject below).
+function isVisibleProject(p) {
+  return !p.deleted;
+}
+
 async function renderHome() {
-  const allProjects = await MossDB.projects.all();
+  const allProjects = (await MossDB.projects.all()).filter(isVisibleProject);
   const projects = allProjects.filter(isActiveProject);
-  const allIssues = await MossDB.issues.all();
+  const visibleIds = new Set(allProjects.map((p) => p.id));
+  const allIssues = (await MossDB.issues.all()).filter((i) => visibleIds.has(i.projectId));
   const openCount = allIssues.filter((i) => i.status === "Open").length;
 
   const header = `
@@ -416,6 +430,49 @@ async function hydrateRemoteCapture(capture) {
   }
 }
 
+// Best-effort: moves the project's OneDrive folder into a Trash folder
+// there (see moveProjectToTrash in graph.js) instead of leaving it in
+// Active Projects. Never blocks or reverses the app-side delete — if
+// OneDrive isn't connected, or the move fails for any reason, the project
+// is still gone from Moss either way; this only tidies up OneDrive.
+async function trashProjectFolder(projectName) {
+  if (!msalConfigured() || !msCurrentAccount()) return;
+  try {
+    const token = await msGetToken();
+    if (!token) return;
+    await moveProjectToTrash(projectName, token);
+  } catch (err) {
+    console.error("Couldn't move project folder to OneDrive Trash:", err);
+  }
+}
+
+// Asks for confirmation, then soft-deletes a project (see isVisibleProject
+// for why it's a flag and not a real removal) and syncs that deletion out
+// to OneDrive/other devices. The project's own files (photos, voice notes,
+// documents) aren't deleted — trashProjectFolder relocates that whole
+// OneDrive folder into MOSS PROJECTS/99 TRASH rather than removing it.
+function confirmDeleteProject(project) {
+  openSheet(`
+    <h2>Delete "${escapeHtml(project.name)}"?</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">
+      This removes it from Moss on every device you sync with. Its OneDrive folder moves to MOSS PROJECTS ▸ 99 TRASH rather than being deleted, in case you need anything from it later.
+    </p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="cancel-delete">Cancel</button>
+      <button class="btn primary" id="confirm-delete" style="background:var(--red, #DC2626);">Delete Project</button>
+    </div>
+  `);
+  document.getElementById("cancel-delete").addEventListener("click", closeSheet);
+  document.getElementById("confirm-delete").addEventListener("click", async () => {
+    closeSheet();
+    await MossDB.projects.update(project.id, { deleted: true });
+    syncProjectsWithOneDrive();
+    trashProjectFolder(project.name);
+    toast(`"${project.name}" deleted`);
+    location.hash = "#/projects";
+  });
+}
+
 async function openNewProjectSheet() {
   const existing = await MossDB.projects.all();
   const existingIds = new Set(existing.map((p) => p.id));
@@ -494,7 +551,7 @@ function wireHomeActions(allIssues) {
 // ---------- Projects list ----------
 
 async function renderProjectsList() {
-  const allProjects = await MossDB.projects.all();
+  const allProjects = (await MossDB.projects.all()).filter(isVisibleProject);
   const active = allProjects.filter(isActiveProject);
   const completed = allProjects.filter((p) => !isActiveProject(p));
   const header = `
@@ -532,7 +589,7 @@ async function renderProjectsList() {
 
 async function renderDashboard(id) {
   const project = await MossDB.projects.get(id);
-  if (!project) {
+  if (!project || project.deleted) {
     location.hash = "#/";
     return;
   }
@@ -699,6 +756,13 @@ async function renderDashboard(id) {
         <span class="main"><span class="title">${completed ? "Reactivate Project" : "Mark Project Complete"}</span></span>
       </button>
     </div>
+
+    <div class="card card-list">
+      <button class="row" id="delete-project" style="color:var(--red, #DC2626);">
+        <span class="icon">🗑️</span>
+        <span class="main"><span class="title">Delete Project</span></span>
+      </button>
+    </div>
   `;
 
   shell({ header, body, activeTab: "projects" });
@@ -711,6 +775,7 @@ async function renderDashboard(id) {
     toast(completed ? "Project reactivated" : "Project marked complete");
     renderDashboard(id);
   });
+  $app.querySelector("#delete-project").addEventListener("click", () => confirmDeleteProject(project));
 
   const logs = await MossDB.logs.forProject(id);
   const $logList = document.getElementById("log-list");
@@ -728,8 +793,9 @@ async function renderDashboard(id) {
 // ---------- Open issues (all projects) ----------
 
 async function renderAllIssues() {
-  const issues = (await MossDB.issues.all()).filter((i) => i.status === "Open");
-  const projects = await MossDB.projects.all();
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
+  const visibleIds = new Set(projects.map((p) => p.id));
+  const issues = (await MossDB.issues.all()).filter((i) => i.status === "Open" && visibleIds.has(i.projectId));
   const nameOf = (id) => projects.find((p) => p.id === id)?.name || id;
 
   const header = `
@@ -767,7 +833,7 @@ async function renderAllIssues() {
 // prompt size fast, and nothing here reads photos or transcribes audio
 // yet, so including the raw data would just be noise Claude can't use.
 async function buildAIContext() {
-  const projects = await MossDB.projects.all();
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
   const allIssues = await MossDB.issues.all();
   const lines = [];
 
@@ -995,7 +1061,7 @@ function currentProjectId() {
 
 async function pickProjectIfNeeded(preselected) {
   if (preselected) return preselected;
-  const projects = await MossDB.projects.all();
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
   return new Promise((resolve) => {
     let resolved = false;
     const finish = (value) => {
@@ -1327,7 +1393,7 @@ async function showNextSteps() {
 }
 
 async function showDailyReport() {
-  const projects = await MossDB.projects.all();
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
   const today = new Date().toDateString();
   let lines = [];
   for (const p of projects) {
