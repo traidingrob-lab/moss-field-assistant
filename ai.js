@@ -316,14 +316,21 @@ async function identifyMaterial(dataUrl, transcript = "") {
 
   const prompt =
     "You are helping a general contractor build a materials shopping list from a job-site photo.\n" +
-    "Identify the construction material or product in the photo (read any visible label, brand, model or size markings). " +
-    "Then use web search to find its exact product name and real dimensions/specs (nominal and actual size, length, thickness, " +
-    "gauge, rating, pack or box quantity — whatever applies). Search once or twice and prefer manufacturer or major supplier pages. " +
-    "If it is a generic commodity (e.g. 2x4 lumber, 1/2\" drywall), give the standard name and standard dimensions.\n" +
+    "Work in TWO steps, in this order:\n" +
+    "STEP 1 - STYLE / NAME: decide exactly WHAT it is and its style, using the photo and the voice note (read any visible label, brand, " +
+    "model or markings). Be specific about the type and style: e.g. for trim/molding say which kind (baseboard, crown, casing, chair rail, " +
+    "quarter round, shoe, cove, door stop...) and its profile style (colonial, ranch/flat, craftsman, bullnose, etc.) and material " +
+    "(MDF, pine, PVC, primed, finger-jointed...). For other products give the type, grade or model (e.g. PEX-A pipe, Type X drywall, " +
+    "Romex 14/2 cable). Start the item name with the product type and style.\n" +
+    "STEP 2 - DIMENSIONS: only AFTER the style/name is settled, use web search to find the real dimensions/specs of THAT style " +
+    "(for molding: height x thickness x length; also nominal vs actual size, thickness, gauge, rating, pack or box quantity - whatever applies). " +
+    "Search once or twice and prefer manufacturer or major supplier pages. " +
+    "If it is a generic commodity (e.g. 2x4 lumber, 1/2\" drywall), give the standard name and standard dimensions. " +
+    "If the photo does not show a size, do not guess from the photo: use the voice note or the standard sizes found online, and say which.\n" +
     noteSection +
     "If you cannot tell what it is, say so — do not invent specs.\n" +
     "Do all searching first. Your final message must be ONLY a JSON object (no markdown, no other text) with these keys:\n" +
-    '"item": specific product name in English, max 12 words (include brand/model only if visible, stated or confirmed),\n' +
+    '"item": style/type first, then name, in English, max 12 words, e.g. "Colonial baseboard molding, primed MDF" (include brand/model only if visible, stated or confirmed),\n' +
     '"dimensions": size/specs on one line in US units (inches/feet), metric in parentheses only when it is standard; "" if unknown,\n' +
     '"quantity": how many to buy, ONLY if the voice note clearly says (e.g. "12", "2 boxes", "3 sheets"), otherwise "",\n' +
     '"note": the voice note cleaned up — fix obvious recognition errors, punctuation and capitalization, but do not add, remove or ' +
