@@ -277,6 +277,9 @@ async function saveCapturesIndex(token, captures) {
     createdAt: c.createdAt,
     caption: c.caption || null,
     transcript: c.transcript || null,
+    translation: c.translation || null,
+    translationLang: c.translationLang || null,
+    deleted: c.deleted ? true : undefined,
     remoteFileName: c.remoteFileName || null
   }));
   const blob = new Blob([JSON.stringify(light, null, 2)], { type: "application/json" });

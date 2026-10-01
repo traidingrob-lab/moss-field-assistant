@@ -350,7 +350,7 @@ async function syncCapturesWithOneDrive() {
     const token = await msGetToken();
     if (!token) return false;
 
-    const [allLocal, remote] = await Promise.all([MossDB.captures.all(), fetchCapturesIndex(token)]);
+    const [allLocal, remote] = await Promise.all([MossDB.captures.allRaw(), fetchCapturesIndex(token)]);
     // Scoped to photo/voice on purpose: those are the only capture types
     // this app writes a caption/transcript onto. Material and inspection
     // captures carry other fields (status, result, comments) that this
@@ -363,6 +363,22 @@ async function syncCapturesWithOneDrive() {
     if (remote) {
       for (const rc of remote.filter((c) => c.type === "photo" || c.type === "voice")) {
         const lc = byId.get(rc.id);
+        if (rc.deleted) {
+          // Deleted on another device: delete it here too (keeping only the
+          // tombstone, so it is never brought back by a later sync).
+          if (!lc) {
+            const tomb = { id: rc.id, projectId: rc.projectId, type: rc.type, createdAt: rc.createdAt, deleted: true, deletedAt: new Date().toISOString() };
+            byId.set(rc.id, tomb);
+            await MossDB.captures.upsert(tomb);
+            changed = true;
+          } else if (!lc.deleted) {
+            await MossDB.captures.remove(lc.id);
+            byId.set(lc.id, { id: lc.id, projectId: lc.projectId, type: lc.type, createdAt: lc.createdAt, deleted: true });
+            changed = true;
+          }
+          continue;
+        }
+        if (lc && lc.deleted) continue; // deleted here: stays deleted, and the merged index will tell other devices
         if (!lc) {
           // A capture taken on another device — save what we can (text
           // only; remoteOnly marks it so the UI doesn't try to show a
@@ -618,7 +634,10 @@ async function renderDashboard(id) {
   const captures = await MossDB.captures.forProject(id);
   const openIssues = issues.filter((i) => i.status === "Open");
   const photos = captures.filter((c) => c.type === "photo");
-  const materials = captures.filter((c) => c.type === "material");
+  const allMaterials = captures.filter((c) => c.type === "material");
+  const materials = allMaterials.filter((c) => !c.archived); // bought ones live in the drawer
+  const drawerMaterialCount = allMaterials.length - materials.length;
+  const drawerIssueCount = issues.filter((i) => i.status === "Completed").length;
 
   // Any capture on this project that's still a text-only stub from another
   // device (has a caption/transcript but no dataUrl) gets its real photo/
@@ -662,7 +681,7 @@ async function renderDashboard(id) {
       <div class="stat-tile warn"><span class="num" style="color:var(--amber-deep);">${openIssues.length}</span><span class="label">OPEN ISSUES</span></div>
       <div class="stat-tile"><span class="num">${issues.filter((i) => i.status === "Waiting").length}</span><span class="label">WAITING</span></div>
       <div class="stat-tile"><span class="num">${captures.filter((c) => c.type === "inspection").length}</span><span class="label">INSPECTIONS</span></div>
-      <div class="stat-tile"><span class="num">${captures.filter((c) => c.type === "material").length}</span><span class="label">MATERIALS</span></div>
+      <div class="stat-tile"><span class="num">${materials.length}</span><span class="label">MATERIALS</span></div>
       <div class="stat-tile"><span class="num">${new Set(openIssues.map((i) => i.trade)).size}</span><span class="label">TRADES ON OPEN</span></div>
     </div>
 
@@ -686,15 +705,20 @@ async function renderDashboard(id) {
             ? openIssues
                 .map(
                   (i) => `
-          <div class="row" ${i.photoId ? `data-issue-id="${escapeHtml(i.id)}" style="cursor:pointer;"` : `style="cursor:default;"`}>
+          <div class="row" data-issue-id="${escapeHtml(i.id)}" style="cursor:pointer;">
             <span class="icon" style="color:var(--red);">●</span>
             <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(i.trade)}${i.requirement ? " · " + escapeHtml(i.requirement.split("\n")[0]) : ""}</span></span>
-            ${i.photoId ? `<span class="chev" style="white-space:nowrap;">📷 ›</span>` : ""}
+            <span class="chev" style="white-space:nowrap;">${i.photoId ? "📷 " : ""}›</span>
           </div>`
                 )
                 .join("")
             : `<div class="row"><span class="empty">No open issues yet — capture one from the field.</span></div>`
         }
+        <div class="row" data-drawer="issue" style="cursor:pointer;">
+          <span class="icon">🗄️</span>
+          <span class="main"><span class="title">Drawer</span><span class="desc">Fixed issues · ${drawerIssueCount}</span></span>
+          <span class="chev">›</span>
+        </div>
       </div>
     </div>
 
@@ -708,15 +732,20 @@ async function renderDashboard(id) {
                 .reverse()
                 .map(
                   (m) => `
-          <div class="row" ${m.photoId || m.note ? `data-material-id="${escapeHtml(m.id)}" style="cursor:pointer;"` : `style="cursor:default;"`}>
+          <div class="row" data-material-id="${escapeHtml(m.id)}" style="cursor:pointer;">
             <span class="icon">📦</span>
             <span class="main"><span class="title">${escapeHtml(m.name)}</span><span class="desc">${[m.dimensions, m.quantity ? "Qty " + m.quantity : "", m.status || ""].filter(Boolean).map(escapeHtml).join(" · ")}</span></span>
-            ${m.photoId || m.note ? `<span class="chev" style="white-space:nowrap;">${m.photoId ? "📷 " : ""}›</span>` : ""}
+            <span class="chev" style="white-space:nowrap;">${m.photoId ? "📷 " : ""}›</span>
           </div>`
                 )
                 .join("") + (materials.length > 10 ? `<div class="row"><span class="empty">Showing the 10 most recent of ${materials.length}. The PDF list includes all of them.</span></div>` : "")
             : `<div class="row"><span class="empty">No materials yet — snap a photo of one to start a shopping list.</span></div>`
         }
+        <div class="row" data-drawer="material" style="cursor:pointer;">
+          <span class="icon">🗄️</span>
+          <span class="main"><span class="title">Drawer</span><span class="desc">Bought materials · ${drawerMaterialCount}</span></span>
+          <span class="chev">›</span>
+        </div>
       </div>
     </div>
 
@@ -821,6 +850,9 @@ async function renderDashboard(id) {
   $app.querySelector('[data-quick="issue-pdf"]').addEventListener("click", () => openIssuesPdfSheet(id));
   $app.querySelector('[data-quick="material"]').addEventListener("click", () => openMaterialSheet(id));
   $app.querySelector('[data-quick="material-pdf"]').addEventListener("click", () => openMaterialsPdfSheet(id));
+  $app.querySelectorAll("[data-drawer]").forEach((el) => {
+    el.addEventListener("click", () => openDrawerSheet(el.dataset.drawer, id));
+  });
   $app.querySelectorAll("[data-material-id]").forEach((el) => {
     el.addEventListener("click", () => {
       const material = materials.find((m) => m.id === el.dataset.materialId);
@@ -962,7 +994,7 @@ async function buildAIContext() {
       // Anything we actually have text for (a photo caption from AI, a
       // voice-note transcript) gets surfaced so Ask AI can answer
       // questions about what's IN a capture, not just that it exists.
-      for (const m of captures.filter((c) => c.type === "material").slice(-20)) {
+      for (const m of captures.filter((c) => c.type === "material" && !c.archived).slice(-20)) {
         const bits = [m.dimensions, m.quantity ? `qty ${m.quantity}` : "", m.note].filter(Boolean).join("; ");
         lines.push(`- Material [${m.status || "?"}]: ${m.name}${bits ? ` — ${bits}` : ""}`);
       }
@@ -1927,9 +1959,26 @@ function openIssueDetail(issue, captures) {
     ${translationCardHtml(issue.translation, issue.translationLang)}
     ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
+    ${
+      issue.status === "Completed"
+        ? `<button class="btn ghost" id="d-restore" style="width:100%;">↩ Back to Open Issues</button>`
+        : `<button class="btn ghost" id="d-archive" style="width:100%;">🗄️ Fixed — move to drawer</button>`
+    }
     ${closeButton()}
   `);
   wireCloseButton();
+  document.getElementById("d-archive")?.addEventListener("click", async () => {
+    await MossDB.issues.add({ ...issue, status: "Completed", archivedAt: new Date().toISOString() });
+    closeSheet();
+    toast("Moved to the drawer");
+    render();
+  });
+  document.getElementById("d-restore")?.addEventListener("click", async () => {
+    await MossDB.issues.add({ ...issue, status: "Open" });
+    closeSheet();
+    toast("Back in Open Issues");
+    render();
+  });
   wireRetranslate(
     "d-retr",
     noteText,
@@ -2115,6 +2164,146 @@ function voiceLangPickerHtml(id, disabled) {
   return `<select id="${id}" ${disabled ? "disabled" : ""} aria-label="Voice note language" style="width:100%; margin-bottom:6px;">${VOICE_LANG_OPTIONS.map(
     (o) => `<option value="${o.value}" ${cur === o.value ? "selected" : ""}>🎙️ ${escapeHtml(o.value ? o.label : "Language: Auto (this device)")}</option>`
   ).join("")}</select>`;
+}
+
+// ---------- Drawer: fixed issues and bought materials ----------
+// Each project has two drawers. "Fixed" issues (status Completed) and
+// "bought" materials (archived) leave the working lists but stay here; from
+// the drawer they can be restored or deleted for good (with a confirmation).
+
+async function deleteIssueCompletely(issue) {
+  const caps = await MossDB.captures.forProject(issue.projectId);
+  const ids = new Set([issue.photoId, issue.voiceId].filter(Boolean));
+  for (const c of caps) if (c.issueId === issue.id) ids.add(c.id);
+  for (const id of ids) await MossDB.captures.remove(id);
+  await MossDB.issues.remove(issue.id);
+}
+
+async function deleteMaterialCompletely(material) {
+  const caps = await MossDB.captures.forProject(material.projectId);
+  const ids = new Set([material.photoId, material.voiceId].filter(Boolean));
+  for (const c of caps) if (c.materialId === material.id) ids.add(c.id);
+  for (const id of ids) await MossDB.captures.remove(id);
+  await MossDB.captures.remove(material.id);
+}
+
+async function loadDrawerItems(kind, projectId) {
+  if (kind === "issue") {
+    return (await MossDB.issues.forProject(projectId))
+      .filter((i) => i.status === "Completed")
+      .sort((a, b) => String(b.archivedAt || b.createdAt).localeCompare(String(a.archivedAt || a.createdAt)));
+  }
+  return (await MossDB.captures.forProject(projectId))
+    .filter((c) => c.type === "material" && c.archived)
+    .sort((a, b) => String(b.archivedAt || b.createdAt).localeCompare(String(a.archivedAt || a.createdAt)));
+}
+
+async function openDrawerSheet(kind, projectId) {
+  const isIssue = kind === "issue";
+  const items = await loadDrawerItems(kind, projectId);
+  const nameOf = (it) => (isIssue ? it.title : it.name);
+  const descOf = (it) =>
+    isIssue
+      ? [it.trade, it.requirement ? it.requirement.split("\n")[0] : ""].filter(Boolean).join(" · ")
+      : [it.dimensions, it.quantity ? "Qty " + it.quantity : "", it.status || ""].filter(Boolean).join(" · ");
+
+  openSheet(`
+    <h2>🗄️ ${isIssue ? "Issues drawer" : "Materials drawer"}</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">${
+      isIssue
+        ? "Fixed issues. Restore sends one back to Open Issues; Delete removes it for good."
+        : "Materials already bought. Restore puts one back on the list; Delete removes it for good."
+    }</p>
+    ${
+      items.length
+        ? `<div class="card card-list">${items
+            .map(
+              (it) => `
+        <div class="row" style="cursor:default; flex-direction:column; align-items:stretch; gap:8px;">
+          <span class="main"><span class="title">${escapeHtml(nameOf(it))}</span><span class="desc">${escapeHtml(descOf(it))}</span></span>
+          <div style="display:flex; gap:8px;">
+            <button class="btn ghost" data-dr-view="${escapeHtml(it.id)}" style="flex:1; padding:8px 6px; font-size:13px;">👁 View</button>
+            <button class="btn ghost" data-dr-restore="${escapeHtml(it.id)}" style="flex:1; padding:8px 6px; font-size:13px;">↩ Restore</button>
+            <button class="btn ghost" data-dr-delete="${escapeHtml(it.id)}" style="flex:1; padding:8px 6px; font-size:13px; color:var(--red, #DC2626);">🗑 Delete</button>
+          </div>
+        </div>`
+            )
+            .join("")}</div>`
+        : `<p class="empty" style="text-align:center;">The drawer is empty.</p>`
+    }
+    <div class="sheet-actions">
+      ${items.length ? `<button class="btn ghost" id="dr-empty" style="color:var(--red, #DC2626);">🗑 Empty drawer</button>` : ""}
+      <button class="btn primary" id="dr-close">Close</button>
+    </div>
+  `);
+  document.getElementById("dr-close").addEventListener("click", closeSheet);
+  const find = (id) => items.find((it) => it.id === id);
+
+  $sheet.querySelectorAll("[data-dr-view]").forEach((el) =>
+    el.addEventListener("click", async () => {
+      const it = find(el.dataset.drView);
+      if (!it) return;
+      const caps = await MossDB.captures.forProject(projectId);
+      if (isIssue) openIssueDetail(it, caps);
+      else openMaterialDetail(it, caps);
+    })
+  );
+  $sheet.querySelectorAll("[data-dr-restore]").forEach((el) =>
+    el.addEventListener("click", async () => {
+      const it = find(el.dataset.drRestore);
+      if (!it) return;
+      if (isIssue) await MossDB.issues.add({ ...it, status: "Open" });
+      else await MossDB.captures.update(it.id, { archived: false, archivedAt: null });
+      toast(isIssue ? "Back in Open Issues" : "Back on the list");
+      render();
+      openDrawerSheet(kind, projectId);
+    })
+  );
+  $sheet.querySelectorAll("[data-dr-delete]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const it = find(el.dataset.drDelete);
+      if (it) confirmDrawerDelete(kind, projectId, [it]);
+    })
+  );
+  document.getElementById("dr-empty")?.addEventListener("click", () => confirmDrawerDelete(kind, projectId, items));
+}
+
+// Asks before anything is deleted for good.
+function confirmDrawerDelete(kind, projectId, items) {
+  const isIssue = kind === "issue";
+  const many = items.length > 1;
+  const what = many ? `all ${items.length} ${isIssue ? "issues" : "materials"}` : `"${isIssue ? items[0].title : items[0].name}"`;
+  openSheet(`
+    <h2>Delete ${escapeHtml(what)}?</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">
+      This permanently removes ${many ? "them" : "it"}, with the photo and voice note, from the app. It can't be undone.
+      Copies already saved in OneDrive are not deleted.
+    </p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="dr-cancel-delete">Cancel</button>
+      <button class="btn primary" id="dr-confirm-delete" style="background:var(--red, #DC2626);">Delete${many ? " all" : ""}</button>
+    </div>
+  `);
+  document.getElementById("dr-cancel-delete").addEventListener("click", () => openDrawerSheet(kind, projectId));
+  document.getElementById("dr-confirm-delete").addEventListener("click", async () => {
+    const btn = document.getElementById("dr-confirm-delete");
+    btn.disabled = true;
+    try {
+      for (const it of items) {
+        if (isIssue) await deleteIssueCompletely(it);
+        else await deleteMaterialCompletely(it);
+      }
+    } catch (err) {
+      console.error("Deleting from the drawer failed", err);
+      toast("Couldn't delete — try again");
+      btn.disabled = false;
+      return;
+    }
+    toast("Deleted");
+    syncCapturesWithOneDrive(); // tell the other devices (best effort)
+    render();
+    openDrawerSheet(kind, projectId);
+  });
 }
 
 // ---------- Voice note translation (Spanish <-> English) ----------
@@ -2611,9 +2800,17 @@ function openMaterialDetail(material, captures) {
     ${retranslateButtonHtml("d-retr", !!material.translation, material.note)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${material.sources && material.sources.length ? `<span class="desc">Checked online: ${material.sources.map(escapeHtml).join(", ")}</span>` : ""}
+    <button class="btn ghost" id="d-archive" style="width:100%;">${material.archived ? "↩ Put back on the list" : "🗄️ Bought — move to drawer"}</button>
     ${closeButton()}
   `);
   wireCloseButton();
+  document.getElementById("d-archive")?.addEventListener("click", async () => {
+    const patch = material.archived ? { archived: false, archivedAt: null } : { archived: true, archivedAt: new Date().toISOString() };
+    await MossDB.captures.update(material.id, patch);
+    closeSheet();
+    toast(material.archived ? "Back on the list" : "Moved to the drawer");
+    render();
+  });
   wireRetranslate(
     "d-retr",
     material.note || "",
@@ -2643,7 +2840,7 @@ async function openMaterialsPdfSheet(projectId) {
   for (const p of projects) {
     const captures = await MossDB.captures.forProject(p.id);
     const materials = captures
-      .filter((c) => c.type === "material")
+      .filter((c) => c.type === "material" && !c.archived) // bought ones are in the drawer
       .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     if (materials.length) groups.push({ project: p, captures, materials });
   }

@@ -69,6 +69,15 @@ const MossDB = (() => {
     });
   }
 
+  async function del(store, id) {
+    const s = await tx(store, "readwrite");
+    return new Promise((resolve, reject) => {
+      const req = s.delete(id);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
   async function get(store, id) {
     const s = await tx(store, "readonly");
     return new Promise((resolve, reject) => {
@@ -123,11 +132,38 @@ const MossDB = (() => {
           status: "Open",
           createdAt: new Date().toISOString(),
           ...issue
-        })
+        }),
+      // Permanently removes an issue (issues are local-only, never synced).
+      remove: (id) => del("issues", id)
     },
     captures: {
-      all: () => getAll("captures"),
-      forProject: (projectId) => getByIndex("captures", "projectId", projectId),
+      // all() / forProject() never return deleted captures (see remove below);
+      // allRaw() includes those tombstones — only the OneDrive sync uses it.
+      all: async () => (await getAll("captures")).filter((c) => !c.deleted),
+      allRaw: () => getAll("captures"),
+      forProject: async (projectId) => (await getByIndex("captures", "projectId", projectId)).filter((c) => !c.deleted),
+      // Deletes a capture. Photos and voice notes are synced to other devices
+      // through a text index, so they leave a small tombstone ({deleted:true},
+      // no photo/audio/text) — otherwise the next sync would bring them back
+      // from OneDrive. Other types (materials, inspections) are not synced and
+      // are removed outright.
+      remove: async (id) => {
+        const existing = await get("captures", id);
+        if (!existing) return false;
+        if (existing.type === "photo" || existing.type === "voice") {
+          await put("captures", {
+            id: existing.id,
+            projectId: existing.projectId,
+            type: existing.type,
+            createdAt: existing.createdAt,
+            deleted: true,
+            deletedAt: new Date().toISOString()
+          });
+        } else {
+          await del("captures", id);
+        }
+        return true;
+      },
       add: (capture) =>
         put("captures", {
           id: uid(),
