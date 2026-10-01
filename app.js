@@ -1585,10 +1585,11 @@ function openIssueSheet(projectId) {
     } else if (state.voice) {
       voiceBlock = `
         <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
+        ${voiceLangPickerHtml("i-vlang", state.saving)}
         <button class="btn ghost" id="i-rec" ${state.saving ? "disabled" : ""}>🎤 Re-record</button>
       `;
     } else {
-      voiceBlock = `<button class="btn primary" id="i-rec">🎤 Record voice note</button>`;
+      voiceBlock = `${voiceLangPickerHtml("i-vlang", false)}<button class="btn primary" id="i-rec">🎤 Record voice note</button>`;
     }
 
     let detailsBlock = "";
@@ -1644,6 +1645,7 @@ function openIssueSheet(projectId) {
     $("f-title")?.addEventListener("input", (e) => { state.title = e.target.value; state.titleTouched = true; });
     $("f-title-lang")?.addEventListener("change", (e) => changeTitleLang(e.target.value));
     $("i-retr")?.addEventListener("click", () => runTranslate(true));
+    $("i-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
     $("f-trade")?.addEventListener("change", (e) => { state.trade = e.target.value; state.tradeTouched = true; });
     $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
   };
@@ -2104,6 +2106,17 @@ function showPdfReady(blob, fileName, count, noun = "issue") {
   });
 }
 
+// Small "what language are you speaking" picker shown above the record
+// button. Speech-to-text works in ONE language per recording, so dictating
+// Spanish with an English device language gives garbage: pick it here
+// (same setting as Settings → Voice note language).
+function voiceLangPickerHtml(id, disabled) {
+  const cur = voiceLangStored();
+  return `<select id="${id}" ${disabled ? "disabled" : ""} aria-label="Voice note language" style="width:100%; margin-bottom:6px;">${VOICE_LANG_OPTIONS.map(
+    (o) => `<option value="${o.value}" ${cur === o.value ? "selected" : ""}>🎙️ ${escapeHtml(o.value ? o.label : "Language: Auto (this device)")}</option>`
+  ).join("")}</select>`;
+}
+
 // ---------- Voice note translation (Spanish <-> English) ----------
 // Controlled by the Settings switch (aiTranslateEnabled). The translation is
 // saved next to the note as `translation` + `translationLang` (the language
@@ -2251,10 +2264,11 @@ function openMaterialSheet(projectId) {
     } else if (state.voice) {
       voiceBlock = `
         <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
+        ${voiceLangPickerHtml("m-vlang", state.saving || state.identifying)}
         <button class="btn ghost" id="m-rec" ${state.saving || state.identifying ? "disabled" : ""}>🎤 Re-record</button>
       `;
     } else {
-      voiceBlock = `<button class="btn primary" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Record voice note</button>`;
+      voiceBlock = `${voiceLangPickerHtml("m-vlang", state.saving)}<button class="btn primary" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Record voice note</button>`;
     }
 
     let aiBlock = "";
@@ -2311,6 +2325,7 @@ function openMaterialSheet(projectId) {
     $("m-stop")?.addEventListener("click", stopRecording);
     $("m-ai")?.addEventListener("click", runIdentify);
     $("m-retr")?.addEventListener("click", () => runTranslate(true));
+    $("m-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
     $("m-save")?.addEventListener("click", save);
     // Keep state in sync as the user types, so redraws never lose edits. The
     // Save button is updated in place (no redraw while typing).

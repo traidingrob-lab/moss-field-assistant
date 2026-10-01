@@ -211,10 +211,10 @@ function downscaleImageForAI(dataUrl, maxEdge = 1568) {
 //   note        — the transcript cleaned up (speech-recognition errors,
 //                 punctuation), never embellished
 // One API call per new issue; only runs when an API key is saved.
-// The written note must say what the person said. The AI is told to only add
-// punctuation and capitals, but if it still rewrote, shortened or summarized
-// (checked by comparing words), use the original transcript instead (with a
-// capital first letter and a final period).
+// The written note must say what the person said. The AI may add punctuation
+// and fix an obviously misheard word, but if it rewrote, shortened, extended
+// or summarized (checked by comparing words), use the original transcript
+// instead (with a capital first letter and a final period).
 function wordsOf(t) {
   return String(t || "")
     .toLowerCase()
@@ -247,9 +247,12 @@ function faithfulNote(raw, cleaned) {
       counts.set(w, n - 1);
     }
   }
-  const recall = shared / rawW.length; // how much of what was said is still there
-  const precision = shared / clW.length; // how much of the note was really said
-  return recall >= 0.9 && precision >= 0.9 ? cleaned : tidyTranscript(raw);
+  // Fixing a misheard word is fine; rewriting is not. So: about the same
+  // length (a summary is shorter, extra content is longer) and at least half
+  // of the said words still there in the same note.
+  const ratio = clW.length / rawW.length;
+  const recall = shared / rawW.length;
+  return ratio >= 0.8 && ratio <= 1.25 && recall >= 0.5 ? cleaned : tidyTranscript(raw);
 }
 
 // Which language new issue titles are written in: "en" or "es". Remembered
@@ -305,8 +308,9 @@ async function analyzeIssueCapture(dataUrl, transcript, trades, titleLang = "en"
     '"trade": exactly one item from the list above,\n' +
     `"title": a specific issue title, max 8 words, written in ${titleLang === "es" ? "Spanish" : "English"},\n` +
     '"description": one short, specific sentence describing what the photo shows,\n' +
-    '"note": the transcript copied WORD FOR WORD — only add punctuation and capital letters. Do not rephrase, summarize, shorten, ' +
-    "reorder, translate or \"fix\" any word, and do not drop or add any sentence (empty string if the transcript is empty).\n" +
+    '"note": the transcript copied WORD FOR WORD, in the same order — add punctuation and capital letters, and correct a word ONLY when the ' +
+    "speech recognizer clearly misheard it and the right word is obvious from the context (e.g. a trade term). Do not rephrase, summarize, " +
+    "shorten, reorder or translate, and do not drop or add any sentence (empty string if the transcript is empty).\n" +
     `Write the title in ${titleLang === "es" ? "Spanish" : "English"} (always, whatever language the note is in). ` +
     "Write description and note in the same language as the transcript; if there is no transcript, use English.";
 
@@ -435,8 +439,9 @@ async function identifyMaterial(dataUrl, transcript = "") {
     '"item": style/type first, then name, in English, max 12 words, e.g. "Colonial baseboard molding, primed MDF" (include brand/model only if visible, stated or confirmed),\n' +
     '"dimensions": size/specs on one line in US units (inches/feet), metric in parentheses only when it is standard; "" if unknown,\n' +
     '"quantity": how many to buy, ONLY if the voice note clearly says (e.g. "12", "2 boxes", "3 sheets"), otherwise "",\n' +
-    '"note": the voice note copied WORD FOR WORD — only add punctuation and capital letters. Do not rephrase, summarize, shorten, ' +
-    'reorder, translate or "fix" any word, and do not drop or add any sentence; "" if there is no voice note,\n' +
+    '"note": the voice note copied WORD FOR WORD, in the same order — add punctuation and capital letters, and correct a word ONLY when the ' +
+    "speech recognizer clearly misheard it and the right word is obvious from the context (e.g. a trade term). Do not rephrase, summarize, " +
+    'shorten, reorder or translate, and do not drop or add any sentence; "" if there is no voice note,\n' +
     '"confidence": "high", "medium" or "low",\n' +
     '"details": one short sentence in English saying what you identified and what you could not confirm.';
 
