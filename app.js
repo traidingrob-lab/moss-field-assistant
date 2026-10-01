@@ -634,6 +634,9 @@ async function renderDashboard(id) {
   const captures = await MossDB.captures.forProject(id);
   const openIssues = issues.filter((i) => i.status === "Open");
   const photos = captures.filter((c) => c.type === "photo");
+  const inspections = captures
+    .filter((c) => c.type === "inspection")
+    .sort((a, b) => String(b.recordedAt || b.createdAt).localeCompare(String(a.recordedAt || a.createdAt)));
   const allMaterials = captures.filter((c) => c.type === "material");
   const materials = allMaterials.filter((c) => !c.archived); // bought ones live in the drawer
   const drawerMaterialCount = allMaterials.length - materials.length;
@@ -750,6 +753,28 @@ async function renderDashboard(id) {
     </div>
 
     <div>
+      <div class="section-label">Inspections<span><span class="link" data-quick="inspection-pdf">📄 PDF</span><span class="link" data-quick="inspection" style="margin-left:14px;">+ Add</span></span></div>
+      <div class="card card-list" style="margin-top:10px;">
+        ${
+          inspections.length
+            ? inspections
+                .slice(0, 10)
+                .map((i) => {
+                  const info = inspectionResultInfo(i.result);
+                  return `
+          <div class="row" data-inspection-id="${escapeHtml(i.id)}" style="cursor:pointer;">
+            <span class="icon">${info.icon}</span>
+            <span class="main"><span class="title">${escapeHtml(i.name || "Inspection")}</span><span class="desc">${[info.short, i.recordedAt || i.createdAt ? new Date(i.recordedAt || i.createdAt).toLocaleDateString() : "", i.inspector].filter(Boolean).map(escapeHtml).join(" · ")}</span></span>
+            <span class="chev" style="white-space:nowrap;">${(i.photoIds && i.photoIds.length) ? "📷 " : ""}›</span>
+          </div>`;
+                })
+                .join("") + (inspections.length > 10 ? `<div class="row"><span class="empty">Showing the 10 most recent of ${inspections.length}. The PDF includes all of them.</span></div>` : "")
+            : `<div class="row"><span class="empty">No inspections yet — tap + Add to record one with the inspector.</span></div>`
+        }
+      </div>
+    </div>
+
+    <div>
       <div class="section-label">Recent Captures${photos.length ? `<span><span class="link" data-manage="photo">🗑 Clear</span></span>` : ""}</div>
       <div class="thumb-grid" style="margin-top:10px;">
         ${
@@ -850,6 +875,14 @@ async function renderDashboard(id) {
   $app.querySelector('[data-quick="issue-pdf"]').addEventListener("click", () => openIssuesPdfSheet(id));
   $app.querySelector('[data-quick="material"]').addEventListener("click", () => openMaterialSheet(id));
   $app.querySelector('[data-quick="material-pdf"]').addEventListener("click", () => openMaterialsPdfSheet(id));
+  $app.querySelector('[data-quick="inspection"]').addEventListener("click", () => openInspectionSheet(id));
+  $app.querySelector('[data-quick="inspection-pdf"]').addEventListener("click", () => openInspectionsPdfSheet(id));
+  $app.querySelectorAll("[data-inspection-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const insp = inspections.find((i) => i.id === el.dataset.inspectionId);
+      if (insp) openInspectionDetail(insp, captures);
+    });
+  });
   $app.querySelectorAll("[data-manage]").forEach((el) => {
     el.addEventListener("click", () => openCaptureManager(el.dataset.manage, id));
   });
@@ -1000,6 +1033,10 @@ async function buildAIContext() {
       for (const m of captures.filter((c) => c.type === "material" && !c.archived).slice(-20)) {
         const bits = [m.dimensions, m.quantity ? `qty ${m.quantity}` : "", m.note].filter(Boolean).join("; ");
         lines.push(`- Material [${m.status || "?"}]: ${m.name}${bits ? ` — ${bits}` : ""}`);
+      }
+
+      for (const i of captures.filter((c) => c.type === "inspection").slice(-10)) {
+        lines.push(`- Inspection [${inspectionResultInfo(i.result).short || "?"}]: ${i.name}${i.inspector ? ` (inspector ${i.inspector})` : ""}${i.comments ? ` — ${i.comments}` : ""}`);
       }
 
       const described = captures.filter((c) => c.caption || c.transcript);
@@ -1275,6 +1312,8 @@ function wireQuickCapture() {
   $app.querySelectorAll("[data-capture]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const type = btn.dataset.capture;
+      // Inspection has its own "choose the project" step at the top of its sheet.
+      if (type === "inspection") return openInspectionSheet(currentProjectId());
       const projectId = await pickProjectIfNeeded(currentProjectId());
       if (!projectId) return;
       if (type === "photo") capturePhoto(projectId);
@@ -1282,7 +1321,6 @@ function wireQuickCapture() {
       else if (type === "document") captureDocument(projectId);
       else if (type === "issue") openIssueSheet(projectId);
       else if (type === "material") openMaterialSheet(projectId);
-      else if (type === "inspection") openInspectionSheet(projectId);
     });
   });
 }
@@ -2316,7 +2354,7 @@ function confirmDrawerDelete(kind, projectId, items) {
 // can be deleted one by one (the issue/material just loses that photo or
 // audio), but "Clear all" leaves them alone so it can't damage an issue.
 
-function captureOwnerLabel(c, issues, materials) {
+function captureOwnerLabel(c, issues, materials, inspections = []) {
   if (c.issueId) {
     const i = issues.find((x) => x.id === c.issueId);
     return i ? `issue "${i.title}"` : "an issue";
@@ -2324,6 +2362,10 @@ function captureOwnerLabel(c, issues, materials) {
   if (c.materialId) {
     const m = materials.find((x) => x.id === c.materialId);
     return m ? `material "${m.name}"` : "a material";
+  }
+  if (c.inspectionId) {
+    const x = inspections.find((i) => i.id === c.inspectionId);
+    return x ? `inspection "${x.name}"` : "an inspection";
   }
   return "";
 }
@@ -2340,16 +2382,24 @@ async function deleteCaptureAndUnlink(c) {
     const m = (await MossDB.captures.forProject(c.projectId)).find((x) => x.id === c.materialId);
     if (m && m[field] === c.id) await MossDB.captures.update(m.id, { [field]: null });
   }
+  if (c.inspectionId) {
+    const x = (await MossDB.captures.forProject(c.projectId)).find((i) => i.id === c.inspectionId);
+    if (x) {
+      if (c.type === "photo") await MossDB.captures.update(x.id, { photoIds: (x.photoIds || []).filter((id) => id !== c.id) });
+      else if (x.voiceId === c.id) await MossDB.captures.update(x.id, { voiceId: null });
+    }
+  }
 }
 
 async function openCaptureManager(kind, projectId) {
   const isPhoto = kind === "photo";
   const [caps, issues] = await Promise.all([MossDB.captures.forProject(projectId), MossDB.issues.forProject(projectId)]);
   const materials = caps.filter((c) => c.type === "material");
+  const inspections = caps.filter((c) => c.type === "inspection");
   const items = caps
     .filter((c) => c.type === kind)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-  const loose = items.filter((c) => !c.issueId && !c.materialId);
+  const loose = items.filter((c) => !c.issueId && !c.materialId && !c.inspectionId);
   const noun = isPhoto ? "photos" : "voice notes";
 
   openSheet(`
@@ -2359,7 +2409,7 @@ async function openCaptureManager(kind, projectId) {
       items.length
         ? `<div class="card card-list">${items
             .map((c) => {
-              const owner = captureOwnerLabel(c, issues, materials);
+              const owner = captureOwnerLabel(c, issues, materials, inspections);
               const when = c.createdAt ? new Date(c.createdAt).toLocaleString() : "";
               return `
         <div class="row" style="cursor:default; gap:12px;">
@@ -2389,7 +2439,7 @@ async function openCaptureManager(kind, projectId) {
   $sheet.querySelectorAll("[data-cm-delete]").forEach((el) =>
     el.addEventListener("click", () => {
       const c = byId(el.dataset.cmDelete);
-      if (c) confirmCaptureDelete(kind, projectId, [c], captureOwnerLabel(c, issues, materials));
+      if (c) confirmCaptureDelete(kind, projectId, [c], captureOwnerLabel(c, issues, materials, inspections));
     })
   );
   document.getElementById("cm-clear-all")?.addEventListener("click", () => confirmCaptureDelete(kind, projectId, loose, ""));
@@ -2403,7 +2453,7 @@ function confirmCaptureDelete(kind, projectId, items, owner) {
     <p class="empty" style="text-align:left; margin-top:-4px;">
       ${
         owner
-          ? `This ${noun} is part of ${escapeHtml(owner)}. The ${items[0].issueId ? "issue" : "material"} stays, but loses its ${noun}. `
+          ? `This ${noun} is part of ${escapeHtml(owner)}. The ${items[0].issueId ? "issue" : items[0].inspectionId ? "inspection" : "material"} stays, but loses its ${noun}. `
           : ""
       }This permanently removes ${many ? "them" : "it"} from the app. It can't be undone. Copies already saved in OneDrive are not deleted.
     </p>
@@ -3044,33 +3094,595 @@ async function openMaterialsPdfSheet(projectId) {
   });
 }
 
-function openInspectionSheet(projectId) {
+// ---------- Inspections ----------
+// Walk an inspection with the inspector while recording a voice note. The AI
+// writes the note up word for word, names the inspection, and (if switched
+// on) translates the note Spanish <-> English; photos are optional; the
+// result (Passed / Failed / Scheduled) is picked at the bottom. A saved
+// inspection can be turned into a PDF report and shared.
+// Stored as a capture of type "inspection": { name (title), result, comments
+// (the note), inspector, recordedAt, photoIds[], voiceId, translation,
+// translationLang }. Its photos / voice note are normal captures that carry
+// inspectionId, so they sync to OneDrive like any other.
+
+const INSPECTION_RESULTS = [
+  { value: "Passed", label: "✅ Passed", short: "Passed", icon: "✅" },
+  { value: "Failed / corrections required", label: "❌ Failed", short: "Failed", icon: "❌" },
+  { value: "Scheduled", label: "🗓 Scheduled", short: "Scheduled", icon: "🗓" }
+];
+
+function inspectionResultInfo(value) {
+  return INSPECTION_RESULTS.find((r) => r.value === value) || { value, short: value || "", icon: "🏛️" };
+}
+
+const MAX_INSPECTION_PHOTOS = 15;
+
+async function openInspectionSheet(preProjectId) {
+  const visible = (await MossDB.projects.all()).filter(isVisibleProject);
+  const projects = [...visible.filter(isActiveProject), ...visible.filter((p) => !isActiveProject(p))];
+  const state = {
+    projectId: preProjectId && projects.some((p) => p.id === preProjectId) ? preProjectId : "",
+    photos: [], // [{ dataUrl, file }]
+    voice: null, // { blob, dataUrl, mimeType, transcript, startedAt }
+    recorder: null,
+    recording: false,
+    analyzing: false,
+    aiNote: "",
+    aiRan: false,
+    title: "",
+    titleLang: issueTitleLang(),
+    titleBusy: false,
+    titleTouched: false,
+    note: "",
+    noteTouched: false,
+    translation: "",
+    translationLang: "",
+    translatedFrom: "",
+    translating: false,
+    inspector: "",
+    result: "",
+    saving: false
+  };
+  let closed = false;
+  let analysisRun = 0;
+  let translateRun = 0;
+  let titleRun = 0;
+
+  const busyNow = () => state.analyzing || state.translating || state.titleBusy;
+
+  const draw = () => {
+    if (closed) return;
+    const haveProject = !!state.projectId;
+    const canSave = haveProject && !!state.result && !state.recording && !busyNow() && !state.saving;
+
+    const projectBlock = `
+      <select id="in-project" ${state.recording || state.saving ? "disabled" : ""}>
+        ${haveProject ? "" : `<option value="">Choose a project…</option>`}
+        ${projects.map((p) => `<option value="${escapeHtml(p.id)}" ${p.id === state.projectId ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+      </select>`;
+
+    let voiceBlock;
+    if (!haveProject) {
+      voiceBlock = `<button class="btn ghost" disabled>🎤 Choose the project first</button>`;
+    } else if (state.recording) {
+      voiceBlock = `
+        <div class="rec-indicator"><span class="dot"></span><span>Recording the inspection… talk through it with the inspector</span></div>
+        <button class="btn primary" id="in-stop">⏹ Stop recording</button>`;
+    } else if (state.voice) {
+      voiceBlock = `
+        <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
+        ${voiceLangPickerHtml("in-vlang", state.saving || busyNow())}
+        <button class="btn ghost" id="in-rec" ${state.saving || busyNow() ? "disabled" : ""}>🎤 Re-record</button>`;
+    } else {
+      voiceBlock = `${voiceLangPickerHtml("in-vlang", state.saving)}<button class="btn primary" id="in-rec" ${state.saving ? "disabled" : ""}>🎤 Start recording</button>`;
+    }
+
+    let noteBlock = "";
+    if (state.voice && !state.recording) {
+      noteBlock = `
+        <div class="field">
+          <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
+          <textarea id="in-note" rows="5" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what was said (optional)"}">${escapeHtml(state.note)}</textarea>
+        </div>
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("in-retr", !!state.translation, state.note)}
+        ${state.analyzing ? `<p class="empty" style="text-align:left;">🤖 AI is writing up the note and naming the inspection…</p>` : ""}
+        ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
+        ${aiConfigured() && !state.analyzing ? `<button class="btn ghost" id="in-ai" ${state.saving || state.translating ? "disabled" : ""}>🤖 ${state.aiRan ? "Run AI again" : "Name it with AI"}</button>` : ""}`;
+    }
+
+    const photosBlock = haveProject
+      ? `
+        ${
+          state.photos.length
+            ? `<div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;">${state.photos
+                .map(
+                  (p, i) => `<div style="position:relative;"><img src="${p.dataUrl}" alt="Inspection photo ${i + 1}" style="width:84px; height:84px; object-fit:cover; border-radius:10px; display:block;"><button class="btn ghost" data-rm-photo="${i}" ${state.saving ? "disabled" : ""} style="position:absolute; top:-6px; right:-6px; width:26px; height:26px; padding:0; border-radius:50%; font-size:13px; line-height:1;" aria-label="Remove photo">✕</button></div>`
+                )
+                .join("")}</div>`
+            : ""
+        }
+        <button class="btn ghost" id="in-photo" ${state.recording || state.saving || state.photos.length >= MAX_INSPECTION_PHOTOS ? "disabled" : ""}>📸 ${state.photos.length ? "Add another photo" : "Add photo"} ${state.photos.length ? `(${state.photos.length}/${MAX_INSPECTION_PHOTOS})` : ""}</button>`
+      : `<button class="btn ghost" disabled>📸 Choose the project first</button>`;
+
+    $sheet.innerHTML = `
+      <h2>Inspection</h2>
+      <div class="field"><label>1 · Project</label>${projectBlock}</div>
+      <div class="field"><label>2 · Voice note — record during the inspection</label>${voiceBlock}</div>
+      ${noteBlock}
+      <div class="field"><label>3 · Photos (optional)</label>${photosBlock}</div>
+      <div class="field">
+        <label>Inspection · title language</label>
+        <select id="in-title-lang" ${busyNow() || state.saving ? "disabled" : ""}>
+          <option value="en" ${state.titleLang === "en" ? "selected" : ""}>English</option>
+          <option value="es" ${state.titleLang === "es" ? "selected" : ""}>Español</option>
+        </select>
+      </div>
+      <div class="field"><label>Inspection (type / title)</label><input id="in-title" value="${escapeHtml(state.title)}" placeholder='${state.titleLang === "es" ? "p. ej. &quot;Inspección de estructura, segundo piso&quot;" : "e.g. &quot;Framing inspection, second floor&quot;"}'></div>
+      ${state.titleBusy ? `<p class="empty" style="text-align:left;">🌐 ${state.titleLang === "es" ? "Traduciendo el título…" : "Translating the title…"}</p>` : ""}
+      <div class="field"><label>Inspector (optional)</label><input id="in-inspector" value="${escapeHtml(state.inspector)}" placeholder="Name"></div>
+      <div class="field">
+        <label>Result</label>
+        <div style="display:flex; gap:8px;">
+          ${INSPECTION_RESULTS.map(
+            (r) => `<button class="btn ${state.result === r.value ? "primary" : "ghost"}" data-result="${escapeHtml(r.value)}" aria-pressed="${state.result === r.value}" ${state.saving ? "disabled" : ""} style="flex:1; padding:12px 6px; font-size:14px;">${r.label}</button>`
+          ).join("")}
+        </div>
+      </div>
+      <div class="sheet-actions">
+        <button class="btn ghost" id="in-cancel">Cancel</button>
+        <button class="btn primary" id="in-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : busyNow() ? "Working…" : "Save"}</button>
+      </div>
+      <div class="sheet-actions">
+        <button class="btn ghost" id="in-save-pdf" ${canSave ? "" : "disabled"} style="width:100%; ${canSave ? "" : "opacity:.5;"}">📄 Save &amp; create PDF</button>
+      </div>`;
+    wire();
+  };
+
+  const wire = () => {
+    const $ = (id) => document.getElementById(id);
+    $("in-cancel")?.addEventListener("click", closeSheet);
+    $("in-project")?.addEventListener("change", (e) => { state.projectId = e.target.value; draw(); });
+    $("in-rec")?.addEventListener("click", startRecording);
+    $("in-stop")?.addEventListener("click", stopRecording);
+    $("in-photo")?.addEventListener("click", takePhoto);
+    $("in-ai")?.addEventListener("click", runAnalysis);
+    $("in-retr")?.addEventListener("click", () => runTranslate(true));
+    $("in-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
+    $("in-title-lang")?.addEventListener("change", (e) => changeTitleLang(e.target.value));
+    $("in-save")?.addEventListener("click", () => save(false));
+    $("in-save-pdf")?.addEventListener("click", () => save(true));
+    $sheet.querySelectorAll("[data-rm-photo]").forEach((el) =>
+      el.addEventListener("click", () => { state.photos.splice(Number(el.dataset.rmPhoto), 1); draw(); })
+    );
+    $sheet.querySelectorAll("[data-result]").forEach((el) =>
+      el.addEventListener("click", () => { state.result = el.dataset.result; draw(); })
+    );
+    // Keep state in sync while typing (no redraw, so the caret never jumps);
+    // Save buttons are updated in place.
+    $("in-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
+    $("in-title")?.addEventListener("input", (e) => { state.title = e.target.value; state.titleTouched = true; });
+    $("in-inspector")?.addEventListener("input", (e) => { state.inspector = e.target.value; });
+  };
+
+  const takePhoto = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.capture = "environment";
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (!file || closed) return;
+      let dataUrl;
+      try {
+        dataUrl = await fileToDataUrl(file);
+      } catch {
+        toast("Couldn't read that photo");
+        return;
+      }
+      if (closed || state.photos.length >= MAX_INSPECTION_PHOTOS) return;
+      state.photos.push({ dataUrl, file });
+      draw();
+    });
+    input.click();
+  };
+
+  const startRecording = async () => {
+    try {
+      state.recorder = await startVoiceRecorder();
+    } catch (err) {
+      toast(err.message === "Microphone not available in this browser" ? err.message : "Microphone permission denied");
+      return;
+    }
+    if (closed) {
+      state.recorder.cancel();
+      state.recorder = null;
+      return;
+    }
+    state.recording = true;
+    draw();
+  };
+
+  const stopRecording = async () => {
+    const rec = state.recorder;
+    if (!rec) return;
+    state.recorder = null;
+    const stopBtn = document.getElementById("in-stop");
+    if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = "Finishing…"; }
+    let result = null;
+    try {
+      result = await rec.stop();
+    } catch (err) {
+      console.error("Stopping recording failed", err);
+    }
+    state.recording = false;
+    if (closed) return;
+    if (!result) {
+      toast("Nothing was recorded — try again");
+      draw();
+      return;
+    }
+    state.voice = result;
+    state.note = result.transcript; // the AI tidies it below; stays as-is if the AI fails
+    state.noteTouched = false;
+    state.aiNote = "";
+    state.aiRan = false;
+    state.translation = "";
+    state.translatedFrom = "";
+    translateRun++;
+    state.translating = false;
+    draw();
+    runAnalysis();
+  };
+
+  // One AI call: names the inspection and writes the note word for word.
+  const runAnalysis = async () => {
+    if (!state.voice || state.analyzing) return;
+    if (!aiConfigured()) {
+      state.aiNote = "Add a Claude API key in Settings to have AI write up the note and name the inspection. Type the title by hand for now.";
+      draw();
+      return;
+    }
+    const run = ++analysisRun;
+    state.analyzing = true;
+    state.aiNote = "";
+    draw();
+    try {
+      const r = await withTimeout(
+        analyzeInspectionCapture(state.photos.map((p) => p.dataUrl), state.voice.transcript, state.titleLang),
+        60000,
+        "it took too long"
+      );
+      if (closed || run !== analysisRun) return;
+      if (!state.titleTouched && r.title) state.title = r.title;
+      if (!state.noteTouched && r.note) state.note = r.note;
+    } catch (err) {
+      if (closed || run !== analysisRun) return;
+      state.aiNote = `AI couldn't analyze this one (${err.message}). Type the title by hand.`;
+    }
+    state.aiRan = true;
+    state.analyzing = false;
+    draw();
+    runTranslate();
+  };
+
+  // Spanish <-> English translation of the note (only when switched on, or
+  // when "Translate again" is pressed).
+  const runTranslate = async (force = false) => {
+    const run = ++translateRun;
+    const text = state.voice ? state.note.trim() : "";
+    if (!(force ? aiConfigured() : aiTranslateEnabled()) || !text) {
+      state.translating = false;
+      state.translation = "";
+      state.translatedFrom = "";
+      draw();
+      return;
+    }
+    state.translating = true;
+    draw();
+    const tr = await tryTranslate(text, force, force ? state.translation : "");
+    if (closed || run !== translateRun) return;
+    if (tr) {
+      state.translation = tr.translation;
+      state.translationLang = tr.target;
+    } else if (force) {
+      toast("Couldn't translate — try again");
+    } else {
+      state.translation = "";
+      state.translationLang = "";
+    }
+    state.translatedFrom = text;
+    state.translating = false;
+    draw();
+  };
+
+  const changeTitleLang = async (lang) => {
+    lang = lang === "es" ? "es" : "en";
+    if (lang === state.titleLang) return;
+    state.titleLang = lang;
+    setIssueTitleLang(lang);
+    const current = state.title.trim();
+    if (!current || !aiConfigured()) {
+      draw();
+      return;
+    }
+    const run = ++titleRun;
+    state.titleBusy = true;
+    draw();
+    try {
+      const t = await withTimeout(translateIssueTitle(current, lang), 20000, "it took too long");
+      if (closed || run !== titleRun) return;
+      if (state.title.trim() === current) state.title = t;
+    } catch {
+      if (closed || run !== titleRun) return;
+      toast("Couldn't translate the title — edit it by hand");
+    }
+    state.titleBusy = false;
+    draw();
+  };
+
+  const save = async (thenPdf) => {
+    if (!state.projectId || !state.result || state.recording || busyNow() || state.saving) return;
+    state.saving = true;
+    draw();
+    try {
+      // The note may have been edited after it was translated: refresh the
+      // translation so the saved pair always matches (skipped if it fails).
+      const noteNow = state.note.trim();
+      if (state.voice && aiTranslateEnabled() && noteNow && noteNow !== state.translatedFrom) {
+        const tr = await tryTranslate(noteNow);
+        state.translation = tr ? tr.translation : "";
+        state.translationLang = tr ? tr.target : "";
+        state.translatedFrom = noteNow;
+      } else if (!noteNow || !state.voice || noteNow !== state.translatedFrom) {
+        state.translation = "";
+      }
+
+      const projectId = state.projectId;
+      const now = Date.now();
+      const inspectionId = MossDB.uid();
+      const stamp = state.voice ? issueStamp(state.voice.startedAt) : issueStamp(new Date());
+      const title = state.title.trim() || `${state.titleLang === "es" ? "Inspección" : "Inspection"} — ${stamp}`;
+      const photoCaps = state.photos.map((p, i) => {
+        const ext = { "image/png": "png", "image/heic": "heic", "image/heif": "heif", "image/webp": "webp" }[p.file.type] || "jpg";
+        return { id: MossDB.uid(), file: p.file, dataUrl: p.dataUrl, remoteFileName: `inspection-photo-${now}-${i + 1}.${ext}` };
+      });
+      const voiceId = state.voice ? MossDB.uid() : null;
+      const voiceName = state.voice ? `inspection-voice-${now}.${state.voice.mimeType.includes("mp4") ? "m4a" : "webm"}` : "";
+
+      for (const p of photoCaps) {
+        await MossDB.captures.add({ id: p.id, projectId, type: "photo", dataUrl: p.dataUrl, name: p.file.name, remoteFileName: p.remoteFileName, caption: title, inspectionId });
+      }
+      if (state.voice) {
+        await MossDB.captures.add({
+          id: voiceId,
+          projectId,
+          type: "voice",
+          dataUrl: state.voice.dataUrl,
+          transcript: noteNow || state.voice.transcript || null,
+          remoteFileName: voiceName,
+          inspectionId,
+          ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
+        });
+      }
+      const saved = await MossDB.captures.add({
+        id: inspectionId,
+        projectId,
+        type: "inspection",
+        name: title,
+        result: state.result,
+        comments: noteNow,
+        inspector: state.inspector.trim(),
+        recordedAt: (state.voice ? state.voice.startedAt : new Date()).toISOString(),
+        photoIds: photoCaps.map((p) => p.id),
+        voiceId,
+        ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
+      });
+
+      const voiceBlob = state.voice ? state.voice.blob : null;
+      closeSheet();
+      toast("Inspection saved");
+      if (currentRoute().name === "project" || currentRoute().name === "home") render();
+
+      // Best-effort OneDrive copy of the files; announce them to other
+      // devices only once everything has actually finished uploading.
+      const uploads = photoCaps.map((p) => syncCaptureToOneDrive(projectId, "photo", p.file, p.remoteFileName));
+      if (voiceBlob) uploads.push(syncCaptureToOneDrive(projectId, "voice", voiceBlob, voiceName));
+      if (uploads.length) Promise.all(uploads).then(() => syncCapturesWithOneDrive());
+
+      if (thenPdf) {
+        const project = await MossDB.projects.get(projectId);
+        const caps = await MossDB.captures.forProject(projectId);
+        makeInspectionsPdf([{ project, inspections: [saved], captures: caps }]);
+      }
+    } catch (err) {
+      console.error("Saving inspection failed", err);
+      state.saving = false;
+      toast("Couldn't save the inspection — try again");
+      draw();
+    }
+  };
+
+  openSheet("", () => {
+    // Runs whenever the sheet goes away (Cancel, backdrop tap, navigation,
+    // or after a save): always release the microphone.
+    closed = true;
+    analysisRun++;
+    translateRun++;
+    titleRun++;
+    if (state.recorder) {
+      state.recorder.cancel();
+      state.recorder = null;
+    }
+  });
+  draw();
+}
+
+// What the PDF builder (and the detail screen) need from a saved inspection.
+function inspectionPdfData(insp, captures) {
+  const photos = (insp.photoIds || []).map((id) => captures.find((c) => c.id === id)?.dataUrl).filter(Boolean);
+  return {
+    title: insp.name || "Inspection",
+    result: insp.result || "",
+    stamp: insp.recordedAt ? issueStamp(new Date(insp.recordedAt)) : insp.createdAt ? issueStamp(new Date(insp.createdAt)) : "",
+    inspector: insp.inspector || "",
+    note: insp.comments || "",
+    translation: insp.translation || "",
+    translationLabel: insp.translation ? translationLabel(insp.translationLang) : "",
+    photos
+  };
+}
+
+// groups = [{ project, inspections: [record...], captures: [...] }] -> PDF -> share sheet.
+async function makeInspectionsPdf(groups) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  try {
+    const sections = groups
+      .filter((g) => g.inspections.length)
+      .map((g) => ({
+        projectName: g.project.name,
+        address: g.project.address || "",
+        inspections: g.inspections.map((i) => inspectionPdfData(i, g.captures))
+      }));
+    const blob = await buildInspectionsPdf(sections);
+    const day = new Date().toISOString().slice(0, 10);
+    const count = sections.reduce((n, s) => n + s.inspections.length, 0);
+    const label = sections.length === 1 ? sections[0].projectName : "All projects";
+    const what = count === 1 ? `Inspection - ${sections[0].inspections[0].title}` : "Inspections";
+    const fileName = `${what} - ${label} - ${day}.pdf`.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ").slice(0, 120).replace(/\s+\.pdf$/, ".pdf");
+    showPdfReady(blob, fileName.endsWith(".pdf") ? fileName : fileName + ".pdf", count, "inspection");
+  } catch (err) {
+    console.error("Inspection PDF build failed", err);
+    toast("Couldn't build the PDF — try again");
+  }
+}
+
+// Picker for the project's inspections (all start checked), then the PDF.
+async function openInspectionsPdfSheet(projectId) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  const project = await MossDB.projects.get(projectId);
+  const captures = await MossDB.captures.forProject(projectId);
+  const inspections = captures
+    .filter((c) => c.type === "inspection")
+    .sort((a, b) => String(a.recordedAt || a.createdAt).localeCompare(String(b.recordedAt || b.createdAt)));
+  if (!project || !inspections.length) {
+    toast("No inspections to put in a PDF yet");
+    return;
+  }
   openSheet(`
-    <h2>Inspection</h2>
-    <div class="field"><label>Type</label><input id="f-type" placeholder="e.g. Mechanical rough-in"></div>
-    <div class="field"><label>Result</label>
-      <select id="f-result"><option>Scheduled</option><option>Passed</option><option>Failed / corrections required</option></select>
+    <h2>Inspection report PDF</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Choose what goes in the report. Each inspection includes its result, photos and written note.</p>
+    <div class="card card-list">
+      ${inspections
+        .map(
+          (i) => `
+        <label class="row" style="cursor:pointer; gap:12px;">
+          <input type="checkbox" data-iid="${escapeHtml(i.id)}" checked style="width:20px; height:20px; flex:none;">
+          <span class="main"><span class="title">${escapeHtml(i.name || "Inspection")}</span><span class="desc">${escapeHtml(inspectionResultInfo(i.result).short)}${i.recordedAt || i.createdAt ? " · " + escapeHtml(new Date(i.recordedAt || i.createdAt).toLocaleDateString()) : ""}</span></span>
+        </label>`
+        )
+        .join("")}
     </div>
-    <div class="field"><label>Inspector comments</label><textarea id="f-comments"></textarea></div>
     <div class="sheet-actions">
-      <button class="btn ghost" id="cancel">Cancel</button>
-      <button class="btn primary" id="save">Save</button>
+      <button class="btn ghost" id="pdf-cancel">Cancel</button>
+      <button class="btn primary" id="pdf-create">Create PDF</button>
     </div>
   `);
-  document.getElementById("cancel").addEventListener("click", closeSheet);
-  document.getElementById("save").addEventListener("click", async () => {
-    const type = document.getElementById("f-type").value.trim();
-    if (!type) { toast("Add an inspection type"); return; }
-    await MossDB.captures.add({
-      projectId,
-      type: "inspection",
-      name: type,
-      result: document.getElementById("f-result").value,
-      comments: document.getElementById("f-comments").value.trim()
-    });
+  document.getElementById("pdf-cancel").addEventListener("click", closeSheet);
+  document.getElementById("pdf-create").addEventListener("click", async () => {
+    const chosen = new Set([...$sheet.querySelectorAll("[data-iid]")].filter((el) => el.checked).map((el) => el.dataset.iid));
+    if (!chosen.size) {
+      toast("Select at least one inspection");
+      return;
+    }
+    const btn = document.getElementById("pdf-create");
+    btn.disabled = true;
+    btn.textContent = "Building PDF…";
+    await makeInspectionsPdf([{ project, inspections: inspections.filter((i) => chosen.has(i.id)), captures }]);
+  });
+}
+
+// A saved inspection: result, date, inspector, photos, note, translation,
+// audio — plus Translate again, PDF and Delete.
+function openInspectionDetail(insp, captures) {
+  const data = inspectionPdfData(insp, captures);
+  const voice = captures.find((c) => c.id === insp.voiceId);
+  const info = inspectionResultInfo(insp.result);
+  openSheet(`
+    <h2>${escapeHtml(data.title)}</h2>
+    <span class="desc">${[`${info.icon} ${info.short}`, data.stamp, data.inspector ? "Inspector: " + data.inspector : ""].filter(Boolean).map(escapeHtml).join(" · ")}</span>
+    ${data.photos.length ? `<div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">${data.photos.map((p) => `<img src="${p}" alt="Inspection photo" style="width:100%; border-radius:10px; display:block;">`).join("")}</div>` : ""}
+    ${data.note ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(data.note)}</div>` : ""}
+    ${translationCardHtml(insp.translation, insp.translationLang)}
+    ${retranslateButtonHtml("d-retr", !!insp.translation, data.note)}
+    ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
+    <button class="btn primary" id="d-pdf" style="width:100%;">📄 Create PDF</button>
+    <button class="btn ghost" id="d-delete" style="width:100%; color:var(--red, #DC2626);">🗑 Delete inspection</button>
+    ${closeButton()}
+  `);
+  wireCloseButton();
+  wireRetranslate(
+    "d-retr",
+    data.note,
+    insp.translation || "",
+    async (patch) => {
+      Object.assign(insp, patch); // the dashboard's own copy too
+      await MossDB.captures.update(insp.id, patch);
+      if (voice) {
+        Object.assign(voice, patch);
+        await MossDB.captures.update(voice.id, patch);
+      }
+    },
+    () => openInspectionDetail(insp, captures)
+  );
+  document.getElementById("d-pdf").addEventListener("click", async () => {
+    const project = await MossDB.projects.get(insp.projectId);
+    makeInspectionsPdf([{ project: project || { name: "Project" }, inspections: [insp], captures }]);
+  });
+  document.getElementById("d-delete").addEventListener("click", () => confirmDeleteInspection(insp));
+}
+
+async function deleteInspectionCompletely(insp) {
+  const caps = await MossDB.captures.forProject(insp.projectId);
+  const ids = new Set([...(insp.photoIds || []), insp.voiceId].filter(Boolean));
+  for (const c of caps) if (c.inspectionId === insp.id) ids.add(c.id);
+  for (const id of ids) await MossDB.captures.remove(id);
+  await MossDB.captures.remove(insp.id);
+}
+
+function confirmDeleteInspection(insp) {
+  openSheet(`
+    <h2>Delete "${escapeHtml(insp.name || "Inspection")}"?</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">
+      This permanently removes the inspection, with its photos and voice note, from the app. It can't be undone.
+      Copies already saved in OneDrive are not deleted.
+    </p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="di-cancel">Cancel</button>
+      <button class="btn primary" id="di-confirm" style="background:var(--red, #DC2626);">Delete</button>
+    </div>
+  `);
+  document.getElementById("di-cancel").addEventListener("click", closeSheet);
+  document.getElementById("di-confirm").addEventListener("click", async () => {
+    const btn = document.getElementById("di-confirm");
+    btn.disabled = true;
+    try {
+      await deleteInspectionCompletely(insp);
+    } catch (err) {
+      console.error("Deleting inspection failed", err);
+      toast("Couldn't delete — try again");
+      btn.disabled = false;
+      return;
+    }
     closeSheet();
-    toast("Inspection logged");
-    if (currentRoute().name === "project") render();
+    toast("Inspection deleted");
+    syncCapturesWithOneDrive();
+    render();
   });
 }
 

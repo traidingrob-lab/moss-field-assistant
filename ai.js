@@ -319,7 +319,7 @@ async function analyzeIssueCapture(dataUrl, transcript, trades, titleLang = "en"
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
       { type: "text", text: prompt }
     ],
-    700
+    Math.min(6000, Math.max(700, Math.ceil(spoken.length / 2) + 500))
   );
 
   const start = text.indexOf("{");
@@ -515,7 +515,8 @@ async function translateVoiceNote(text, previous = "") {
       : "") +
     `Voice note:\n"""${t}"""\n` +
     'Reply with ONLY a JSON object: {"language": "es" or "en" or "other" (the language of the original), "translation": "<the translation>"}';
-  const reply = await callClaude(prompt, 1000);
+  // Long notes (an inspection can run for minutes) need a bigger answer budget.
+  const reply = await callClaude(prompt, Math.min(8000, Math.max(1000, Math.ceil(t.length / 2) + 500)));
   const parsed = parseJsonReply(reply);
   if (!parsed || typeof parsed.translation !== "string") throw new Error("AI reply wasn't readable.");
   const translation = parsed.translation.trim();
@@ -523,4 +524,37 @@ async function translateVoiceNote(text, previous = "") {
   const target = lang === "en" ? "es" : "en";
   if (!translation || translation.toLowerCase() === t.toLowerCase()) return null;
   return { lang: lang === "es" || lang === "en" ? lang : "other", target, translation };
+}
+
+
+// Inspection log: the contractor dictated a note while walking an inspection
+// with the inspector (optionally with photos). Returns { title, note }: a
+// short title naming the inspection (type + area) and the note word for word
+// (same rules as issues: punctuation and obviously misheard words only).
+async function analyzeInspectionCapture(photoDataUrls, transcript, titleLang = "en") {
+  const spoken = (transcript || "").trim();
+  const content = [];
+  for (const dataUrl of (photoDataUrls || []).slice(0, 3)) {
+    const small = await downscaleImageForAI(dataUrl, 1024);
+    const match = /^data:([^;]+);base64,(.*)$/.exec(small || "");
+    if (match) content.push({ type: "image", source: { type: "base64", media_type: match[1], data: match[2] } });
+  }
+  const lang = titleLang === "es" ? "Spanish" : "English";
+  const prompt =
+    "You are helping a general contractor log a building inspection. The contractor dictated a voice note while walking the inspection " +
+    "with the inspector" + (content.length ? ", and took the attached photos" : "") + ".\n" +
+    `Voice note transcript (may contain speech-recognition mistakes): """${spoken}"""\n\n` +
+    "Reply with ONLY a JSON object (no markdown, no other text) with these keys:\n" +
+    `"title": a specific inspection title, max 8 words, written in ${lang} - the type of inspection plus the area if known (e.g. "Framing inspection, second floor"),\n` +
+    '"note": the transcript copied WORD FOR WORD, in the same order - add punctuation and capital letters, and correct a word ONLY when the ' +
+    "speech recognizer clearly misheard it and the right word is obvious from the context (e.g. a trade term). Do not rephrase, summarize, " +
+    "shorten, reorder or translate, and do not drop or add any sentence (empty string if the transcript is empty).\n" +
+    `Write the title in ${lang} (always, whatever language the note is in).`;
+  content.push({ type: "text", text: prompt });
+
+  const text = await callClaude(content, Math.min(8000, Math.max(700, Math.ceil(spoken.length / 2) + 500)));
+  const parsed = parseJsonReply(text);
+  if (!parsed) throw new Error("AI reply wasn't readable.");
+  const str = (v) => (typeof v === "string" ? v.trim() : "");
+  return { title: str(parsed.title), note: faithfulNote(spoken, str(parsed.note)) };
 }

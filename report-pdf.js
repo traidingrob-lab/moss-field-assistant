@@ -432,3 +432,210 @@ async function buildMaterialsPdf(sections, opts = {}) {
   }
   return doc.output("blob");
 }
+
+
+// ---------- Inspection report ----------
+// sections = [{ projectName, address, inspections: [{ title, result, stamp, inspector, note,
+//   translation, translationLabel, photos: [dataUrl, ...] }] }]
+// One block per inspection: title, date/inspector, a colored RESULT chip, a
+// photo grid, the written note and (if there is one) its translation.
+async function buildInspectionsPdf(sections, opts = {}) {
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error("PDF library (jspdf.umd.min.js) isn't loaded.");
+  const { jsPDF } = window.jspdf;
+  const prepareImage = opts.prepareImage || ((d) => prepareImageForPdf(d, 800, 0.75));
+  const generatedAt = opts.generatedAt || new Date();
+
+  const doc = new jsPDF({ unit: "pt", format: "letter" });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const M = 42;
+  const contentW = pageW - M * 2;
+  const bottom = pageH - 56;
+  const INK = [28, 37, 48];
+  const SOFT = [107, 114, 128];
+  const AMBER = [217, 119, 6];
+  const GREEN = [22, 128, 70];
+  const RED = [200, 40, 40];
+  let y = M;
+
+  const ensure = (h) => {
+    if (y + h > bottom) {
+      doc.addPage();
+      y = M;
+    }
+  };
+  const color = (c) => doc.setTextColor(c[0], c[1], c[2]);
+  const font = (style, size) => {
+    doc.setFont("helvetica", style);
+    doc.setFontSize(size);
+  };
+  const rule = (c, width) => {
+    doc.setDrawColor(c[0], c[1], c[2]);
+    doc.setLineWidth(width);
+    doc.line(M, y, pageW - M, y);
+  };
+
+  let dateText;
+  try {
+    dateText = generatedAt.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  } catch {
+    dateText = generatedAt.toDateString();
+  }
+  dateText = pdfSafe(dateText);
+  const total = sections.reduce((n, s) => n + s.inspections.length, 0);
+
+  font("bold", 10);
+  color(AMBER);
+  doc.text("MOSS AI FIELD ASSISTANT", M, y + 8);
+  y += 28;
+  font("bold", 22);
+  color(INK);
+  doc.text("Inspection Report", M, y);
+  y += 18;
+  font("normal", 10);
+  color(SOFT);
+  doc.text(`${dateText}  -  ${total} inspection${total === 1 ? "" : "s"}`, M, y);
+  y += 12;
+  rule(AMBER, 1.5);
+  y += 22;
+
+  const chipFor = (result) => {
+    const r = String(result || "");
+    if (/^pass/i.test(r)) return { text: "PASSED", fill: GREEN };
+    if (/^fail/i.test(r)) return { text: "FAILED / CORRECTIONS REQUIRED", fill: RED };
+    if (/^sched/i.test(r)) return { text: "SCHEDULED", fill: AMBER };
+    return r ? { text: pdfSafe(r).toUpperCase(), fill: SOFT } : null;
+  };
+
+  for (const section of sections) {
+    ensure(70);
+    font("bold", 16);
+    color(INK);
+    const nameLines = doc.splitTextToSize(pdfSafe(section.projectName), contentW);
+    doc.text(nameLines, M, y + 12);
+    y += nameLines.length * 19 + 2;
+    if (section.address) {
+      font("normal", 10);
+      color(SOFT);
+      const addrLines = doc.splitTextToSize(pdfSafe(section.address), contentW);
+      doc.text(addrLines, M, y + 8);
+      y += addrLines.length * 12 + 2;
+    }
+    font("normal", 9);
+    color(SOFT);
+    doc.text(`${section.inspections.length} inspection${section.inspections.length === 1 ? "" : "s"}`, M, y + 8);
+    y += 18;
+
+    for (let i = 0; i < section.inspections.length; i++) {
+      const insp = section.inspections[i];
+
+      font("bold", 12.5);
+      const titleLines = doc.splitTextToSize(`${i + 1}. ${pdfSafe(insp.title)}`, contentW);
+      const metaText = pdfSafe([insp.stamp, insp.inspector ? `Inspector: ${insp.inspector}` : ""].filter(Boolean).join("  -  "));
+      font("normal", 9);
+      const metaLines = metaText ? doc.splitTextToSize(metaText, contentW) : [];
+      // Keep the title, details and result chip together on one page.
+      ensure(titleLines.length * 15 + metaLines.length * 11 + 40);
+
+      font("bold", 12.5);
+      color(INK);
+      doc.text(titleLines, M, y + 11);
+      y += titleLines.length * 15 + 1;
+      if (metaLines.length) {
+        font("normal", 9);
+        color(SOFT);
+        doc.text(metaLines, M, y + 8);
+        y += metaLines.length * 11 + 4;
+      }
+      const chip = chipFor(insp.result);
+      if (chip) {
+        font("bold", 9);
+        const w = doc.getTextWidth(chip.text) + 16;
+        doc.setFillColor(chip.fill[0], chip.fill[1], chip.fill[2]);
+        doc.roundedRect(M, y + 2, w, 16, 3, 3, "F");
+        doc.setTextColor(255, 255, 255);
+        doc.text(chip.text, M + 8, y + 13);
+        y += 26;
+      }
+
+      // Photo grid, two per row.
+      const photos = [];
+      for (const p of insp.photos || []) {
+        const prepared = p ? await prepareImage(p) : null;
+        if (prepared) photos.push(prepared);
+      }
+      const gap = 10;
+      const cellW = (contentW - gap) / 2;
+      const cellMaxH = 180;
+      for (let k = 0; k < photos.length; k += 2) {
+        const row = photos.slice(k, k + 2).map((ph) => {
+          const scale = Math.min(cellW / ph.width, cellMaxH / ph.height);
+          return { ph, w: ph.width * scale, h: ph.height * scale };
+        });
+        const rowH = Math.max(...row.map((c) => c.h));
+        ensure(rowH + 8);
+        row.forEach((c, idx) => {
+          const x = M + idx * (cellW + gap);
+          doc.addImage(c.ph.dataUrl, "JPEG", x, y, c.w, c.h);
+          doc.setDrawColor(220, 224, 229);
+          doc.setLineWidth(0.5);
+          doc.rect(x, y, c.w, c.h);
+        });
+        y += rowH + 8;
+      }
+      if (photos.length) y += 2;
+
+      const note = pdfSafe(insp.note).trim();
+      if (note) {
+        font("normal", 10.5);
+        color(INK);
+        for (const line of doc.splitTextToSize(note, contentW)) {
+          ensure(14);
+          doc.text(line, M, y + 10);
+          y += 14;
+        }
+      } else {
+        font("italic", 10);
+        color(SOFT);
+        ensure(14);
+        doc.text("(No written note)", M, y + 10);
+        y += 14;
+      }
+
+      const tr = pdfSafe(insp.translation).trim();
+      if (tr) {
+        y += 4;
+        font("bold", 9);
+        color(SOFT);
+        ensure(13);
+        doc.text(pdfSafe(insp.translationLabel || "Translation"), M, y + 9);
+        y += 13;
+        font("italic", 10.5);
+        color(INK);
+        for (const line of doc.splitTextToSize(tr, contentW)) {
+          ensure(14);
+          doc.text(line, M, y + 10);
+          y += 14;
+        }
+      }
+
+      y += 10;
+      if (i < section.inspections.length - 1 && y + 20 <= bottom) {
+        rule([229, 231, 235], 0.5);
+        y += 16;
+      }
+    }
+    y += 14;
+  }
+
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    font("normal", 8);
+    color(SOFT);
+    doc.text(`Moss AI Field Assistant  -  ${dateText}`, M, pageH - 28);
+    doc.text(`Page ${p} of ${pages}`, pageW - M, pageH - 28, { align: "right" });
+  }
+
+  return doc.output("blob");
+}
