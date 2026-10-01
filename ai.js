@@ -211,6 +211,47 @@ function downscaleImageForAI(dataUrl, maxEdge = 1568) {
 //   note        — the transcript cleaned up (speech-recognition errors,
 //                 punctuation), never embellished
 // One API call per new issue; only runs when an API key is saved.
+// The written note must say what the person said. The AI is told to only add
+// punctuation and capitals, but if it still rewrote, shortened or summarized
+// (checked by comparing words), use the original transcript instead (with a
+// capital first letter and a final period).
+function wordsOf(t) {
+  return String(t || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function tidyTranscript(raw) {
+  let t = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  t = t.charAt(0).toUpperCase() + t.slice(1);
+  return /[.!?…]$/.test(t) ? t : t + ".";
+}
+
+function faithfulNote(raw, cleaned) {
+  const rawW = wordsOf(raw);
+  const clW = wordsOf(cleaned);
+  if (!rawW.length) return "";
+  if (!clW.length) return tidyTranscript(raw);
+  const counts = new Map();
+  for (const w of rawW) counts.set(w, (counts.get(w) || 0) + 1);
+  let shared = 0;
+  for (const w of clW) {
+    const n = counts.get(w) || 0;
+    if (n > 0) {
+      shared++;
+      counts.set(w, n - 1);
+    }
+  }
+  const recall = shared / rawW.length; // how much of what was said is still there
+  const precision = shared / clW.length; // how much of the note was really said
+  return recall >= 0.9 && precision >= 0.9 ? cleaned : tidyTranscript(raw);
+}
+
 // Which language new issue titles are written in: "en" or "es". Remembered
 // between issues; the New Issue screen has the picker.
 const ISSUE_TITLE_LANG_STORAGE = "moss_issue_title_lang";
@@ -264,8 +305,8 @@ async function analyzeIssueCapture(dataUrl, transcript, trades, titleLang = "en"
     '"trade": exactly one item from the list above,\n' +
     `"title": a specific issue title, max 8 words, written in ${titleLang === "es" ? "Spanish" : "English"},\n` +
     '"description": one short, specific sentence describing what the photo shows,\n' +
-    '"note": the transcript cleaned up — fix obvious speech-recognition errors, punctuation and ' +
-    "capitalization, but do not add, remove or invent any information (empty string if the transcript is empty).\n" +
+    '"note": the transcript copied WORD FOR WORD — only add punctuation and capital letters. Do not rephrase, summarize, shorten, ' +
+    "reorder, translate or \"fix\" any word, and do not drop or add any sentence (empty string if the transcript is empty).\n" +
     `Write the title in ${titleLang === "es" ? "Spanish" : "English"} (always, whatever language the note is in). ` +
     "Write description and note in the same language as the transcript; if there is no transcript, use English.";
 
@@ -288,7 +329,7 @@ async function analyzeIssueCapture(dataUrl, transcript, trades, titleLang = "en"
   }
   const str = (v) => (typeof v === "string" ? v.trim() : "");
   const trade = trades.find((t) => t.toLowerCase() === str(parsed.trade).toLowerCase()) || "General";
-  return { trade, title: str(parsed.title), description: str(parsed.description), note: str(parsed.note) };
+  return { trade, title: str(parsed.title), description: str(parsed.description), note: faithfulNote(spoken, str(parsed.note)) };
 }
 
 
@@ -394,8 +435,8 @@ async function identifyMaterial(dataUrl, transcript = "") {
     '"item": style/type first, then name, in English, max 12 words, e.g. "Colonial baseboard molding, primed MDF" (include brand/model only if visible, stated or confirmed),\n' +
     '"dimensions": size/specs on one line in US units (inches/feet), metric in parentheses only when it is standard; "" if unknown,\n' +
     '"quantity": how many to buy, ONLY if the voice note clearly says (e.g. "12", "2 boxes", "3 sheets"), otherwise "",\n' +
-    '"note": the voice note cleaned up — fix obvious recognition errors, punctuation and capitalization, but do not add, remove or ' +
-    'invent information, and keep the same language as the note; "" if there is no voice note,\n' +
+    '"note": the voice note copied WORD FOR WORD — only add punctuation and capital letters. Do not rephrase, summarize, shorten, ' +
+    'reorder, translate or "fix" any word, and do not drop or add any sentence; "" if there is no voice note,\n' +
     '"confidence": "high", "medium" or "low",\n' +
     '"details": one short sentence in English saying what you identified and what you could not confirm.';
 
@@ -438,7 +479,7 @@ async function identifyMaterial(dataUrl, transcript = "") {
     item: str(parsed.item),
     dimensions: str(parsed.dimensions),
     quantity: str(parsed.quantity),
-    note: spoken ? str(parsed.note) : "",
+    note: spoken ? faithfulNote(spoken, str(parsed.note)) : "",
     confidence,
     details: str(parsed.details),
     searched,
