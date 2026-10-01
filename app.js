@@ -750,7 +750,7 @@ async function renderDashboard(id) {
     </div>
 
     <div>
-      <div class="section-label">Recent Captures</div>
+      <div class="section-label">Recent Captures${photos.length ? `<span><span class="link" data-manage="photo">🗑 Clear</span></span>` : ""}</div>
       <div class="thumb-grid" style="margin-top:10px;">
         ${
           photos.length
@@ -791,7 +791,7 @@ async function renderDashboard(id) {
     </div>
 
     <div>
-      <div class="section-label">Voice Notes</div>
+      <div class="section-label">Voice Notes${captures.some((c) => c.type === "voice") ? `<span><span class="link" data-manage="voice">🗑 Clear</span></span>` : ""}</div>
       <div class="card card-list" style="margin-top:10px;">
         ${
           captures.filter((c) => c.type === "voice").length
@@ -850,6 +850,9 @@ async function renderDashboard(id) {
   $app.querySelector('[data-quick="issue-pdf"]').addEventListener("click", () => openIssuesPdfSheet(id));
   $app.querySelector('[data-quick="material"]').addEventListener("click", () => openMaterialSheet(id));
   $app.querySelector('[data-quick="material-pdf"]').addEventListener("click", () => openMaterialsPdfSheet(id));
+  $app.querySelectorAll("[data-manage]").forEach((el) => {
+    el.addEventListener("click", () => openCaptureManager(el.dataset.manage, id));
+  });
   $app.querySelectorAll("[data-drawer]").forEach((el) => {
     el.addEventListener("click", () => openDrawerSheet(el.dataset.drawer, id));
   });
@@ -2303,6 +2306,128 @@ function confirmDrawerDelete(kind, projectId, items) {
     syncCapturesWithOneDrive(); // tell the other devices (best effort)
     render();
     openDrawerSheet(kind, projectId);
+  });
+}
+
+// ---------- Clear photos / voice notes ----------
+// "🗑 Clear" next to Recent Captures and Voice Notes opens a list of ALL the
+// project's photos (or voice notes) with a Delete button on each, plus
+// "Clear all". Photos and voice notes that belong to an issue or a material
+// can be deleted one by one (the issue/material just loses that photo or
+// audio), but "Clear all" leaves them alone so it can't damage an issue.
+
+function captureOwnerLabel(c, issues, materials) {
+  if (c.issueId) {
+    const i = issues.find((x) => x.id === c.issueId);
+    return i ? `issue "${i.title}"` : "an issue";
+  }
+  if (c.materialId) {
+    const m = materials.find((x) => x.id === c.materialId);
+    return m ? `material "${m.name}"` : "a material";
+  }
+  return "";
+}
+
+// Deletes one photo / voice note and clears the link on its issue/material.
+async function deleteCaptureAndUnlink(c) {
+  await MossDB.captures.remove(c.id);
+  const field = c.type === "photo" ? "photoId" : "voiceId";
+  if (c.issueId) {
+    const issue = (await MossDB.issues.forProject(c.projectId)).find((i) => i.id === c.issueId);
+    if (issue && issue[field] === c.id) await MossDB.issues.add({ ...issue, [field]: null });
+  }
+  if (c.materialId) {
+    const m = (await MossDB.captures.forProject(c.projectId)).find((x) => x.id === c.materialId);
+    if (m && m[field] === c.id) await MossDB.captures.update(m.id, { [field]: null });
+  }
+}
+
+async function openCaptureManager(kind, projectId) {
+  const isPhoto = kind === "photo";
+  const [caps, issues] = await Promise.all([MossDB.captures.forProject(projectId), MossDB.issues.forProject(projectId)]);
+  const materials = caps.filter((c) => c.type === "material");
+  const items = caps
+    .filter((c) => c.type === kind)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const loose = items.filter((c) => !c.issueId && !c.materialId);
+  const noun = isPhoto ? "photos" : "voice notes";
+
+  openSheet(`
+    <h2>🗑 ${isPhoto ? "Photos" : "Voice notes"}</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Delete any one, or clear them all. Deleting asks first and can't be undone.</p>
+    ${
+      items.length
+        ? `<div class="card card-list">${items
+            .map((c) => {
+              const owner = captureOwnerLabel(c, issues, materials);
+              const when = c.createdAt ? new Date(c.createdAt).toLocaleString() : "";
+              return `
+        <div class="row" style="cursor:default; gap:12px;">
+          ${
+            isPhoto
+              ? c.dataUrl
+                ? `<img src="${c.dataUrl}" alt="" style="width:56px; height:56px; object-fit:cover; border-radius:8px; flex:none;">`
+                : `<span class="icon">📷</span>`
+              : `<span class="icon">🎤</span>`
+          }
+          <span class="main"><span class="title">${escapeHtml(isPhoto ? c.caption || "Photo" : c.transcript ? c.transcript.slice(0, 60) : "Voice note")}</span><span class="desc">${escapeHtml(when)}${owner ? " · part of " + escapeHtml(owner) : ""}</span></span>
+          <button class="btn ghost" data-cm-delete="${escapeHtml(c.id)}" style="flex:none; padding:8px 10px; font-size:13px; color:var(--red, #DC2626);">🗑</button>
+        </div>`;
+            })
+            .join("")}</div>`
+        : `<p class="empty" style="text-align:center;">No ${noun}.</p>`
+    }
+    <div class="sheet-actions">
+      ${loose.length ? `<button class="btn ghost" id="cm-clear-all" style="color:var(--red, #DC2626);">🗑 Clear all (${loose.length})</button>` : ""}
+      <button class="btn primary" id="cm-close">Close</button>
+    </div>
+    ${items.length > loose.length && loose.length ? `<p class="empty" style="text-align:left;">"Clear all" keeps the ${items.length - loose.length} ${noun} that belong to an issue or material.</p>` : ""}
+  `);
+  document.getElementById("cm-close").addEventListener("click", closeSheet);
+  const byId = (id) => items.find((c) => c.id === id);
+
+  $sheet.querySelectorAll("[data-cm-delete]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const c = byId(el.dataset.cmDelete);
+      if (c) confirmCaptureDelete(kind, projectId, [c], captureOwnerLabel(c, issues, materials));
+    })
+  );
+  document.getElementById("cm-clear-all")?.addEventListener("click", () => confirmCaptureDelete(kind, projectId, loose, ""));
+}
+
+function confirmCaptureDelete(kind, projectId, items, owner) {
+  const noun = kind === "photo" ? "photo" : "voice note";
+  const many = items.length > 1;
+  openSheet(`
+    <h2>Delete ${many ? `all ${items.length} ${noun}s` : `this ${noun}`}?</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">
+      ${
+        owner
+          ? `This ${noun} is part of ${escapeHtml(owner)}. The ${items[0].issueId ? "issue" : "material"} stays, but loses its ${noun}. `
+          : ""
+      }This permanently removes ${many ? "them" : "it"} from the app. It can't be undone. Copies already saved in OneDrive are not deleted.
+    </p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="cm-cancel-delete">Cancel</button>
+      <button class="btn primary" id="cm-confirm-delete" style="background:var(--red, #DC2626);">Delete${many ? " all" : ""}</button>
+    </div>
+  `);
+  document.getElementById("cm-cancel-delete").addEventListener("click", () => openCaptureManager(kind, projectId));
+  document.getElementById("cm-confirm-delete").addEventListener("click", async () => {
+    const btn = document.getElementById("cm-confirm-delete");
+    btn.disabled = true;
+    try {
+      for (const c of items) await deleteCaptureAndUnlink(c);
+    } catch (err) {
+      console.error("Deleting captures failed", err);
+      toast("Couldn't delete — try again");
+      btn.disabled = false;
+      return;
+    }
+    toast("Deleted");
+    syncCapturesWithOneDrive(); // tell the other devices (best effort)
+    render();
+    openCaptureManager(kind, projectId);
   });
 }
 
