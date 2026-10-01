@@ -197,3 +197,20 @@ html, body {
 .thumb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .thumb .desc { display: block; padding: 6px 8px 8px; }
 .photo-viewer img { width: 100%; border-radius: 12px; display: block; background: var(--line); }
+
+.issue-photo { width: 100%; max-height: 260px; object-fit: cover; border-radius: 12px; display: block; background: var(--line); }
+.btn:disabled { cursor: default; }
+
+/* On/off switch (a styled checkbox) */
+.switch {
+  appearance: none; -webkit-appearance: none; flex: none; width: 46px; height: 28px; margin: 0;
+  border: none; border-radius: 14px; background: #C4CAD3; position: relative; cursor: pointer;
+  transition: background .15s;
+}
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 11px;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .15s;
+}
+.switch:checked { background: var(--green, #16A34A); }
+.switch:checked::after { transform: translateX(18px); }
+.switch:disabled { opacity: .45; cursor: default; }

@@ -614,6 +614,7 @@ async function renderDashboard(id) {
   const captures = await MossDB.captures.forProject(id);
   const openIssues = issues.filter((i) => i.status === "Open");
   const photos = captures.filter((c) => c.type === "photo");
+  const materials = captures.filter((c) => c.type === "material");
 
   // Any capture on this project that's still a text-only stub from another
   // device (has a caption/transcript but no dataUrl) gets its real photo/
@@ -674,20 +675,43 @@ async function renderDashboard(id) {
     </div>
 
     <div>
-      <div class="section-label">Open Issues<span class="link" data-quick="issue">+ Add</span></div>
+      <div class="section-label">Open Issues<span><span class="link" data-quick="issue-pdf">📄 PDF</span><span class="link" data-quick="issue" style="margin-left:14px;">+ Add</span></span></div>
       <div class="card card-list" style="margin-top:10px;">
         ${
           openIssues.length
             ? openIssues
                 .map(
                   (i) => `
-          <div class="row" style="cursor:default;">
+          <div class="row" ${i.photoId ? `data-issue-id="${escapeHtml(i.id)}" style="cursor:pointer;"` : `style="cursor:default;"`}>
             <span class="icon" style="color:var(--red);">●</span>
-            <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(i.trade)}${i.requirement ? " · " + escapeHtml(i.requirement) : ""}</span></span>
+            <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(i.trade)}${i.requirement ? " · " + escapeHtml(i.requirement.split("\n")[0]) : ""}</span></span>
+            ${i.photoId ? `<span class="chev" style="white-space:nowrap;">📷 ›</span>` : ""}
           </div>`
                 )
                 .join("")
             : `<div class="row"><span class="empty">No open issues yet — capture one from the field.</span></div>`
+        }
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Materials<span><span class="link" data-quick="material-pdf">📄 PDF</span><span class="link" data-quick="material" style="margin-left:14px;">+ Add</span></span></div>
+      <div class="card card-list" style="margin-top:10px;">
+        ${
+          materials.length
+            ? materials
+                .slice(-10)
+                .reverse()
+                .map(
+                  (m) => `
+          <div class="row" ${m.photoId || m.note ? `data-material-id="${escapeHtml(m.id)}" style="cursor:pointer;"` : `style="cursor:default;"`}>
+            <span class="icon">📦</span>
+            <span class="main"><span class="title">${escapeHtml(m.name)}</span><span class="desc">${[m.dimensions, m.quantity ? "Qty " + m.quantity : "", m.status || ""].filter(Boolean).map(escapeHtml).join(" · ")}</span></span>
+            ${m.photoId || m.note ? `<span class="chev" style="white-space:nowrap;">${m.photoId ? "📷 " : ""}›</span>` : ""}
+          </div>`
+                )
+                .join("") + (materials.length > 10 ? `<div class="row"><span class="empty">Showing the 10 most recent of ${materials.length}. The PDF list includes all of them.</span></div>` : "")
+            : `<div class="row"><span class="empty">No materials yet — snap a photo of one to start a shopping list.</span></div>`
         }
       </div>
     </div>
@@ -721,7 +745,7 @@ async function renderDashboard(id) {
             ${
               p.caption
                 ? `<span class="desc" style="font-size:12px; line-height:1.35;">${escapeHtml(p.caption)}</span>`
-                : aiConfigured()
+                : aiCaptionsEnabled()
                 ? `<span class="desc" style="font-size:12px; opacity:.6;">Describing…</span>`
                 : ""
             }
@@ -788,6 +812,15 @@ async function renderDashboard(id) {
 
   wireQuickCapture();
   $app.querySelector('[data-quick="issue"]').addEventListener("click", () => openIssueSheet(id));
+  $app.querySelector('[data-quick="issue-pdf"]').addEventListener("click", () => openIssuesPdfSheet(id));
+  $app.querySelector('[data-quick="material"]').addEventListener("click", () => openMaterialSheet(id));
+  $app.querySelector('[data-quick="material-pdf"]').addEventListener("click", () => openMaterialsPdfSheet(id));
+  $app.querySelectorAll("[data-material-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const material = materials.find((m) => m.id === el.dataset.materialId);
+      if (material) openMaterialDetail(material, captures);
+    });
+  });
   $app.querySelector("#toggle-project-status").addEventListener("click", async () => {
     await MossDB.projects.update(id, { status: completed ? "Active" : "Completed" });
     syncProjectsWithOneDrive();
@@ -795,6 +828,12 @@ async function renderDashboard(id) {
     renderDashboard(id);
   });
   $app.querySelector("#delete-project").addEventListener("click", () => confirmDeleteProject(project));
+  $app.querySelectorAll("[data-issue-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const issue = issues.find((i) => i.id === el.dataset.issueId);
+      if (issue) openIssueDetail(issue, captures);
+    });
+  });
   $app.querySelectorAll("[data-photo-id]").forEach((el) => {
     el.addEventListener("click", () => {
       const photo = photos.find((p) => p.id === el.dataset.photoId);
@@ -826,7 +865,10 @@ async function renderAllIssues() {
   const header = `
     <div class="topbar">
       <a class="back-link" href="#/"><span>‹</span><span>Home</span></a>
-      <div class="project-head"><div class="title" style="font-size:20px;">Open Issues</div></div>
+      <div class="project-head">
+        <div class="title" style="font-size:20px;">Open Issues</div>
+        <button class="btn primary" style="flex:none; padding:8px 14px; font-size:13px;" id="issues-pdf">📄 PDF</button>
+      </div>
     </div>
   `;
   const body = `
@@ -847,6 +889,7 @@ async function renderAllIssues() {
     </div>
   `;
   shell({ header, body, activeTab: "home" });
+  document.getElementById("issues-pdf").addEventListener("click", () => openIssuesPdfSheet(null));
 }
 
 // ---------- Ask AI ----------
@@ -886,6 +929,11 @@ async function buildAIContext() {
       // Anything we actually have text for (a photo caption from AI, a
       // voice-note transcript) gets surfaced so Ask AI can answer
       // questions about what's IN a capture, not just that it exists.
+      for (const m of captures.filter((c) => c.type === "material").slice(-20)) {
+        const bits = [m.dimensions, m.quantity ? `qty ${m.quantity}` : "", m.note].filter(Boolean).join("; ");
+        lines.push(`- Material [${m.status || "?"}]: ${m.name}${bits ? ` — ${bits}` : ""}`);
+      }
+
       const described = captures.filter((c) => c.caption || c.transcript);
       for (const c of described.slice(-15)) {
         const when = new Date(c.createdAt).toLocaleDateString();
@@ -990,6 +1038,17 @@ async function renderSettings() {
           ${aiConfigured() ? `<button class="btn ghost" id="ai-key-clear" style="flex:none; padding:8px 14px; font-size:13px;">Clear</button>` : ""}
         </div>
       </div>
+      <div class="row">
+        <span class="icon">🖼️</span>
+        <span class="main"><span class="title">AI photo descriptions</span><span class="desc">${
+          !aiConfigured()
+            ? "Add a Claude API key above to use this"
+            : aiCaptionsEnabled()
+            ? "On — each new photo is described automatically"
+            : "Off — photos are saved without an AI description"
+        }</span></span>
+        <input type="checkbox" class="switch" id="f-ai-captions" ${aiCaptionsEnabled() ? "checked" : ""} ${aiConfigured() ? "" : "disabled"} aria-label="AI photo descriptions">
+      </div>
       <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
         <span class="main"><span class="icon">🎙️</span> <span class="title">Voice note language</span><span class="desc">What language you dictate voice notes in, for transcription</span></span>
         <select id="f-voice-lang" style="width:100%;">
@@ -1031,6 +1090,12 @@ async function renderSettings() {
     renderSettings();
   });
 
+  document.getElementById("f-ai-captions").addEventListener("change", (e) => {
+    setAiCaptions(e.target.checked);
+    toast(e.target.checked ? "AI photo descriptions on" : "AI photo descriptions off");
+    renderSettings();
+  });
+
   document.getElementById("f-voice-lang").addEventListener("change", (e) => {
     setVoiceLang(e.target.value);
     toast("Voice note language saved");
@@ -1066,7 +1131,9 @@ function voiceLangStored() {
 // setup. Only needs changing when someone dictates in a language their
 // device/browser isn't set to.
 function voiceLang() {
-  return voiceLangStored() || navigator.language || "en-US";
+  // Normalized: a few devices report tags like "en-US@posix" or "es_MX",
+  // which speech recognition and Intl both reject.
+  return String(voiceLangStored() || navigator.language || "en-US").split("@")[0].replace(/_/g, "-");
 }
 
 function setVoiceLang(lang) {
@@ -1168,7 +1235,7 @@ function capturePhoto(projectId) {
     // this device's app happens to reload. captionPhoto's own failure is
     // swallowed here (logged, not rethrown) so a captioning error never
     // skips announcing the photo itself.
-    const captionPromise = aiConfigured()
+    const captionPromise = aiCaptionsEnabled()
       ? captionPhoto(dataUrl)
           .then((caption) => caption && MossDB.captures.update(capture.id, { caption }))
           .then(() => { if (currentRoute().name === "project") render(); })
@@ -1288,65 +1355,1034 @@ async function captureVoice(projectId) {
   }
 }
 
+// ---------- New Issue: photo + required voice note + AI ----------
+// Flow: (1) take a photo, (2) record a voice note — the issue can't be
+// saved without both — then (3) AI picks the trade, suggests a title and
+// cleans up the transcript. The note is saved stamped with the day, date
+// and time it was recorded. The photo and voice note are saved as normal
+// captures too (linked to the issue by issueId), so they sync to OneDrive
+// like any other photo/voice note.
+
+// Day + date + time a voice note was recorded, in the voice-note language
+// (e.g. "miércoles, 30 de septiembre de 2026 · 7:26 p. m.").
+function issueStamp(date) {
+  // Some devices report odd language tags ("en-US@posix", "es_MX") that
+  // Intl rejects. Clean the tag up, and if it's still rejected fall back to
+  // the device's default locale — the stamp must always carry the weekday,
+  // date and time, never degrade to a short numeric date.
+  const cleaned = String(voiceLang() || "").split("@")[0].replace(/_/g, "-");
+  for (const loc of [cleaned, undefined]) {
+    try {
+      const d = date.toLocaleDateString(loc || undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+      const t = date.toLocaleTimeString(loc || undefined, { hour: "numeric", minute: "2-digit" });
+      return `${d} · ${t}`;
+    } catch {
+      // try the next locale
+    }
+  }
+  return date.toLocaleString();
+}
+
+// Starts the mic + (where the browser supports it) free live speech-to-text.
+// Same approach as captureVoice, but returns a handle so the New Issue sheet
+// can drive it. Throws if the mic isn't available or permission is denied.
+async function startVoiceRecorder() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    throw new Error("Microphone not available in this browser");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const recorder = new MediaRecorder(stream);
+  const chunks = [];
+  recorder.addEventListener("dataavailable", (e) => {
+    if (e.data && e.data.size) chunks.push(e.data);
+  });
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let recognitionActive = false;
+  let stopping = false;
+  let restarts = 0;
+  let transcript = "";
+  if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = voiceLang();
+    recognition.addEventListener("start", () => { recognitionActive = true; });
+    recognition.addEventListener("result", (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) transcript += e.results[i][0].transcript + " ";
+      }
+    });
+    recognition.addEventListener("error", (e) => {
+      // Permission/service problems won't fix themselves — stop retrying.
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") stopping = true;
+    });
+    // Some browsers end recognition after a pause even in continuous mode;
+    // restart it (a few times at most) so a longer note is still transcribed.
+    recognition.addEventListener("end", () => {
+      recognitionActive = false;
+      if (!stopping && restarts < 20) {
+        restarts++;
+        try { recognition.start(); } catch {}
+      }
+    });
+    try { recognition.start(); } catch {}
+  }
+
+  const startedAt = new Date();
+  recorder.start();
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    stopping = true;
+    stream.getTracks().forEach((t) => t.stop());
+    if (recognition) { try { recognition.stop(); } catch {} }
+  };
+
+  return {
+    startedAt,
+    // Resolves with the finished recording, or null if nothing was recorded.
+    async stop() {
+      if (recorder.state === "inactive") {
+        release();
+        return null;
+      }
+      stopping = true;
+      // Give the recognizer a moment to deliver its last phrase — otherwise
+      // the final words said right before tapping Stop can get lost.
+      const recognitionEnded =
+        recognition && recognitionActive
+          ? new Promise((resolve) => {
+              recognition.addEventListener("end", resolve, { once: true });
+              setTimeout(resolve, 1200);
+            })
+          : Promise.resolve();
+      if (recognition) { try { recognition.stop(); } catch {} }
+      const recorderStopped = new Promise((resolve) => recorder.addEventListener("stop", resolve, { once: true }));
+      recorder.stop();
+      await recorderStopped;
+      await recognitionEnded;
+      release();
+      const mimeType = recorder.mimeType || "audio/webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      if (!blob.size) return null;
+      return { blob, dataUrl: await blobToDataUrl(blob), mimeType, transcript: transcript.trim(), startedAt };
+    },
+    cancel() {
+      try { if (recorder.state !== "inactive") recorder.stop(); } catch {}
+      release();
+    }
+  };
+}
+
 function openIssueSheet(projectId) {
-  openSheet(`
-    <h2>New Issue</h2>
-    <div class="field">
-      <label>Title</label>
-      <input id="f-title" placeholder='e.g. "Hall bathroom floor register"'>
-    </div>
-    <div class="field">
-      <label>Trade</label>
-      <select id="f-trade">${TRADES.map((t) => `<option>${t}</option>`).join("")}</select>
-    </div>
-    <div class="field">
-      <label>Requirement / notes</label>
-      <textarea id="f-req" placeholder="What does it need to pass?"></textarea>
-    </div>
-    <div class="sheet-actions">
-      <button class="btn ghost" id="cancel">Cancel</button>
-      <button class="btn primary" id="save">Save Issue</button>
-    </div>
-  `);
-  document.getElementById("cancel").addEventListener("click", closeSheet);
-  document.getElementById("save").addEventListener("click", async () => {
-    const title = document.getElementById("f-title").value.trim();
-    if (!title) {
-      toast("Give the issue a title");
+  const state = {
+    photo: null, // { dataUrl, file }
+    voice: null, // { blob, dataUrl, mimeType, transcript, startedAt }
+    recorder: null,
+    recording: false,
+    analyzing: false,
+    aiNote: "", // shown when AI couldn't run / failed
+    description: "", // AI's one-line description of the photo
+    title: "",
+    trade: "General",
+    note: "",
+    titleTouched: false, // once the user edits a field by hand, AI never overwrites it
+    tradeTouched: false,
+    noteTouched: false,
+    saving: false
+  };
+  let closed = false;
+  let analysisRun = 0; // bumped on every analysis so a stale result can't overwrite a newer one
+
+  const draw = () => {
+    if (closed) return;
+    const haveBoth = !!(state.photo && state.voice);
+    const canSave = haveBoth && !state.recording && !state.analyzing && !state.saving;
+
+    const photoBlock = `
+      ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Issue photo">` : ""}
+      <button class="btn ghost" id="i-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
+    `;
+
+    let voiceBlock;
+    if (!state.photo) {
+      voiceBlock = `<button class="btn ghost" disabled>🎤 Take the photo first</button>`;
+    } else if (state.recording) {
+      voiceBlock = `
+        <div class="rec-indicator"><span class="dot"></span><span>Recording… describe the issue</span></div>
+        <button class="btn primary" id="i-stop">⏹ Stop recording</button>
+      `;
+    } else if (state.voice) {
+      voiceBlock = `
+        <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
+        <button class="btn ghost" id="i-rec" ${state.saving ? "disabled" : ""}>🎤 Re-record</button>
+      `;
+    } else {
+      voiceBlock = `<button class="btn primary" id="i-rec">🎤 Record voice note</button>`;
+    }
+
+    let detailsBlock = "";
+    if (haveBoth && !state.recording) {
+      detailsBlock = `
+        <div class="field">
+          <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
+          <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
+        </div>
+        <div class="field">
+          <label>Trade</label>
+          <select id="f-trade">${TRADES.map((t) => `<option ${t === state.trade ? "selected" : ""}>${t}</option>`).join("")}</select>
+        </div>
+        <div class="field">
+          <label>Title</label>
+          <input id="f-title" value="${escapeHtml(state.title)}" placeholder='e.g. "Hall bathroom floor register"'>
+        </div>
+        ${state.analyzing ? `<p class="empty" style="text-align:left;">🤖 AI is identifying the trade and writing the note…</p>` : ""}
+        ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
+      `;
+    }
+
+    $sheet.innerHTML = `
+      <h2>New Issue</h2>
+      <div class="field"><label>1 · Photo</label>${photoBlock}</div>
+      <div class="field"><label>2 · Voice note (required)</label>${voiceBlock}</div>
+      ${detailsBlock}
+      <div class="sheet-actions">
+        <button class="btn ghost" id="i-cancel">Cancel</button>
+        <button class="btn primary" id="i-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : state.analyzing ? "Analyzing…" : "Save Issue"}</button>
+      </div>
+    `;
+    wire();
+  };
+
+  const wire = () => {
+    const $ = (id) => document.getElementById(id);
+    $("i-cancel")?.addEventListener("click", closeSheet);
+    $("i-photo")?.addEventListener("click", takePhoto);
+    $("i-rec")?.addEventListener("click", startRecording);
+    $("i-stop")?.addEventListener("click", stopRecording);
+    $("i-save")?.addEventListener("click", save);
+    // Keep state in sync as the user types, so redraws never lose edits.
+    $("f-title")?.addEventListener("input", (e) => { state.title = e.target.value; state.titleTouched = true; });
+    $("f-trade")?.addEventListener("change", (e) => { state.trade = e.target.value; state.tradeTouched = true; });
+    $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
+  };
+
+  const takePhoto = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.capture = "environment";
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (!file || closed) return;
+      let dataUrl;
+      try {
+        dataUrl = await fileToDataUrl(file);
+      } catch {
+        toast("Couldn't read that photo");
+        return;
+      }
+      if (closed) return;
+      state.photo = { dataUrl, file };
+      state.description = "";
+      draw();
+      if (state.voice) runAnalysis(); // photo replaced after the note was recorded
+    });
+    input.click();
+  };
+
+  const startRecording = async () => {
+    try {
+      state.recorder = await startVoiceRecorder();
+    } catch (err) {
+      toast(err.message === "Microphone not available in this browser" ? err.message : "Microphone permission denied");
       return;
     }
-    await MossDB.issues.add({
-      projectId,
-      title,
-      trade: document.getElementById("f-trade").value,
-      requirement: document.getElementById("f-req").value.trim()
-    });
-    closeSheet();
-    toast("Issue created");
-    if (currentRoute().name === "project" || currentRoute().name === "home") render();
+    if (closed) {
+      state.recorder.cancel();
+      state.recorder = null;
+      return;
+    }
+    state.recording = true;
+    draw();
+  };
+
+  const stopRecording = async () => {
+    const rec = state.recorder;
+    if (!rec) return;
+    state.recorder = null;
+    const stopBtn = document.getElementById("i-stop");
+    if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = "Finishing…"; }
+    let result = null;
+    try {
+      result = await rec.stop();
+    } catch (err) {
+      console.error("Stopping recording failed", err);
+    }
+    state.recording = false;
+    if (closed) return;
+    if (!result) {
+      toast("Nothing was recorded — try again");
+      draw();
+      return;
+    }
+    state.voice = result;
+    state.note = result.transcript; // editable; AI cleans it up below
+    state.noteTouched = false;
+    state.aiNote = "";
+    draw();
+    runAnalysis();
+  };
+
+  const runAnalysis = async () => {
+    if (!state.photo || !state.voice) return;
+    if (!aiConfigured()) {
+      state.aiNote = "Add a Claude API key in Settings to have AI pick the trade and write the note. Choose the trade manually for now.";
+      draw();
+      return;
+    }
+    const run = ++analysisRun;
+    state.analyzing = true;
+    state.aiNote = "";
+    draw();
+    try {
+      // Never leave Save locked on a bad connection: give the AI 30s, then
+      // let the user finish the issue by hand.
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("it took too long")), 30000);
+      });
+      let r;
+      try {
+        r = await Promise.race([analyzeIssueCapture(state.photo.dataUrl, state.voice.transcript, TRADES), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (closed || run !== analysisRun) return;
+      if (!state.tradeTouched) state.trade = r.trade;
+      if (!state.titleTouched && r.title) state.title = r.title;
+      state.description = r.description;
+      if (!state.noteTouched && r.note) state.note = r.note;
+    } catch (err) {
+      if (closed || run !== analysisRun) return;
+      state.aiNote = `AI couldn't analyze this one (${err.message}). Pick the trade and add a title manually.`;
+    }
+    state.analyzing = false;
+    draw();
+  };
+
+  const save = async () => {
+    if (!state.photo || !state.voice || state.recording || state.analyzing || state.saving) return;
+    state.saving = true;
+    draw();
+    try {
+      const now = Date.now();
+      const extOfPhoto = { "image/png": "png", "image/heic": "heic", "image/heif": "heif", "image/webp": "webp" }[state.photo.file.type] || "jpg";
+      const extOfVoice = state.voice.mimeType.includes("mp4") ? "m4a" : "webm";
+      // Unique file names: phones often name every camera photo "image.jpg",
+      // which would overwrite earlier photos in OneDrive.
+      const photoName = `issue-photo-${now}.${extOfPhoto}`;
+      const voiceName = `issue-voice-${now}.${extOfVoice}`;
+      const issueId = MossDB.uid();
+      const photoId = MossDB.uid();
+      const voiceId = MossDB.uid();
+      const stamp = issueStamp(state.voice.startedAt);
+      const note = state.note.trim();
+      const title = state.title.trim() || (note ? note.slice(0, 60) : `Issue — ${stamp}`);
+      const trade = TRADES.includes(state.trade) ? state.trade : "General";
+
+      await MossDB.captures.add({
+        id: photoId,
+        projectId,
+        type: "photo",
+        dataUrl: state.photo.dataUrl,
+        name: state.photo.file.name,
+        remoteFileName: photoName,
+        caption: (aiCaptionsEnabled() && state.description) || title,
+        issueId
+      });
+      await MossDB.captures.add({
+        id: voiceId,
+        projectId,
+        type: "voice",
+        dataUrl: state.voice.dataUrl,
+        transcript: note || state.voice.transcript || null,
+        remoteFileName: voiceName,
+        issueId
+      });
+      await MossDB.issues.add({
+        id: issueId,
+        projectId,
+        title,
+        trade,
+        requirement: note ? `${stamp}\n${note}` : stamp,
+        photoId,
+        voiceId,
+        recordedAt: state.voice.startedAt.toISOString()
+      });
+
+      const photoFile = state.photo.file;
+      const voiceBlob = state.voice.blob;
+      closeSheet();
+      toast("Issue created");
+      if (currentRoute().name === "project" || currentRoute().name === "home") render();
+
+      // Best-effort OneDrive copy of both files; announce them to other
+      // devices only once both have actually finished uploading.
+      Promise.all([
+        syncCaptureToOneDrive(projectId, "photo", photoFile, photoName),
+        syncCaptureToOneDrive(projectId, "voice", voiceBlob, voiceName)
+      ]).then(() => syncCapturesWithOneDrive());
+    } catch (err) {
+      console.error("Saving issue failed", err);
+      state.saving = false;
+      toast("Couldn't save the issue — try again");
+      draw();
+    }
+  };
+
+  openSheet("", () => {
+    // Runs whenever the sheet goes away (Cancel, backdrop tap, navigation,
+    // or after a successful save): always release the microphone.
+    closed = true;
+    analysisRun++;
+    if (state.recorder) {
+      state.recorder.cancel();
+      state.recorder = null;
+    }
+  });
+  draw();
+}
+
+// Opens a saved issue with its linked photo, stamped note and voice note.
+function openIssueDetail(issue, captures) {
+  const photo = captures.find((c) => c.id === issue.photoId);
+  const voice = captures.find((c) => c.id === issue.voiceId);
+  openSheet(`
+    <h2>${escapeHtml(issue.title)}</h2>
+    <span class="desc">${escapeHtml(issue.trade)}</span>
+    ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Issue photo">` : ""}
+    ${issue.requirement ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(issue.requirement)}</div>` : ""}
+    ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
+    ${closeButton()}
+  `);
+  wireCloseButton();
+}
+
+// ---------- Issues PDF export ----------
+// Opens a picker of open issues (all pre-checked), builds a PDF from the
+// ones left checked, then offers Share (phone share sheet → email, text,
+// WhatsApp, etc.) and Open/Download. `projectId` limits it to one project;
+// null/undefined covers every active project.
+
+function issuePdfData(issue, captures) {
+  const photo = captures.find((c) => c.id === issue.photoId);
+  const req = issue.requirement || "";
+  let stamp;
+  let note;
+  if (issue.recordedAt) {
+    // Created with the photo + voice note flow: first line is the stamp.
+    const nl = req.indexOf("\n");
+    stamp = nl === -1 ? req : req.slice(0, nl);
+    note = nl === -1 ? "" : req.slice(nl + 1);
+  } else {
+    // Older issue: no stamp saved, so show when it was created.
+    stamp = issue.createdAt ? issueStamp(new Date(issue.createdAt)) : "";
+    note = req;
+  }
+  return { title: issue.title, trade: issue.trade, stamp, note, photoDataUrl: photo?.dataUrl || null };
+}
+
+async function openIssuesPdfSheet(projectId) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject).filter((p) => !projectId || p.id === projectId);
+  const allIssues = await MossDB.issues.all();
+  const groups = projects
+    .map((p) => ({
+      project: p,
+      issues: allIssues
+        .filter((i) => i.projectId === p.id && i.status === "Open")
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+    }))
+    .filter((g) => g.issues.length);
+
+  if (!groups.length) {
+    toast("No open issues to put in a PDF");
+    return;
+  }
+
+  openSheet(`
+    <h2>Issues PDF</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Choose what goes in the report. Each issue includes its photo and written note.</p>
+    ${groups
+      .map(
+        (g) => `
+      ${projectId ? "" : `<div class="section-label">${escapeHtml(g.project.name)}</div>`}
+      <div class="card card-list">
+        ${g.issues
+          .map(
+            (i) => `
+          <label class="row" style="cursor:pointer; gap:12px;">
+            <input type="checkbox" data-iid="${escapeHtml(i.id)}" checked style="width:20px; height:20px; flex:none;">
+            <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(i.trade)}${i.photoId ? " · 📷" : ""}</span></span>
+          </label>`
+          )
+          .join("")}
+      </div>`
+      )
+      .join("")}
+    <div class="sheet-actions">
+      <button class="btn ghost" id="pdf-cancel">Cancel</button>
+      <button class="btn primary" id="pdf-create">Create PDF</button>
+    </div>
+  `);
+  document.getElementById("pdf-cancel").addEventListener("click", closeSheet);
+  document.getElementById("pdf-create").addEventListener("click", async () => {
+    const chosen = new Set([...$sheet.querySelectorAll("[data-iid]")].filter((el) => el.checked).map((el) => el.dataset.iid));
+    if (!chosen.size) {
+      toast("Select at least one issue");
+      return;
+    }
+    const btn = document.getElementById("pdf-create");
+    btn.disabled = true;
+    btn.textContent = "Building PDF…";
+    try {
+      const sections = [];
+      for (const g of groups) {
+        const picked = g.issues.filter((i) => chosen.has(i.id));
+        if (!picked.length) continue;
+        const captures = await MossDB.captures.forProject(g.project.id);
+        sections.push({
+          projectName: g.project.name,
+          address: g.project.address || "",
+          issues: picked.map((i) => issuePdfData(i, captures))
+        });
+      }
+      const blob = await buildIssuesPdf(sections);
+      const day = new Date().toISOString().slice(0, 10);
+      const label = sections.length === 1 ? sections[0].projectName : "All projects";
+      const fileName = `Issues - ${label} - ${day}.pdf`.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ");
+      showPdfReady(blob, fileName, sections.reduce((n, s) => n + s.issues.length, 0));
+    } catch (err) {
+      console.error("PDF build failed", err);
+      toast("Couldn't build the PDF — try again");
+      btn.disabled = false;
+      btn.textContent = "Create PDF";
+    }
   });
 }
 
-function openMaterialSheet(projectId) {
-  openSheet(`
-    <h2>Material</h2>
-    <div class="field"><label>Item</label><input id="f-item" placeholder="e.g. Hard pipe duct, 6&quot;"></div>
-    <div class="field"><label>Status</label>
-      <select id="f-status"><option>Ordered</option><option>Delivered</option><option>Backordered</option></select>
+// Second step: the PDF exists — share it or open/download it. Share has to
+// start from its own tap (phones won't open the share sheet after a long
+// wait that began with a different tap), which is why it's a separate screen.
+function showPdfReady(blob, fileName, count, noun = "issue") {
+  const url = URL.createObjectURL(blob);
+  const file = new File([blob], fileName, { type: "application/pdf" });
+  const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+  const sizeKb = Math.max(1, Math.round(blob.size / 1024));
+  const sizeText = sizeKb >= 1024 ? `${(sizeKb / 1024).toFixed(1)} MB` : `${sizeKb} KB`;
+
+  openSheet(
+    `
+    <h2>PDF ready</h2>
+    <div class="card" style="padding:14px 16px; font-size:14px; line-height:1.5;">
+      <strong>${escapeHtml(fileName)}</strong><br>
+      <span class="desc">${count} ${noun}${count === 1 ? "" : "s"} · ${sizeText}</span>
     </div>
+    <div class="sheet-actions" style="flex-direction:column;">
+      ${canShare ? `<button class="btn primary" id="pdf-share">📤 Share / Send</button>` : ""}
+      <button class="btn ${canShare ? "ghost" : "primary"}" id="pdf-open">${canShare ? "Open / Download" : "📥 Open / Download"}</button>
+      <button class="btn ghost" id="pdf-done">Done</button>
+    </div>
+  `,
+    () => setTimeout(() => URL.revokeObjectURL(url), 60000) // whenever this sheet goes away; delay so a just-opened PDF tab can finish loading
+  );
+
+  document.getElementById("pdf-done").addEventListener("click", closeSheet);
+  document.getElementById("pdf-share")?.addEventListener("click", async () => {
+    try {
+      await navigator.share({ files: [file], title: fileName });
+    } catch (err) {
+      if (err && err.name !== "AbortError") toast("Couldn't open sharing — use Open / Download");
+    }
+  });
+  document.getElementById("pdf-open").addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.target = "_blank";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+}
+
+// ---------- Materials: photo + AI online lookup + voice note ----------
+// Flow: take a photo → AI identifies the product and searches online for its
+// real name and dimensions (fills the fields, all editable) → optionally
+// record a voice note → AI writes it up (cleans the transcript, pulls out a
+// quantity if one was said) → save. The photo and voice note are also saved
+// as normal captures linked to the material (materialId), so they sync to
+// OneDrive like any other photo / voice note. Photo and voice are optional:
+// a material can still be typed in by hand, as before.
+
+const MATERIAL_STATUSES = ["To buy", "Ordered", "Delivered", "Backordered"];
+
+function withTimeout(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function describeMaterialLookup(r) {
+  const parts = [];
+  if (r.searched) {
+    parts.push(r.sources.length ? `🔎 Checked online (${r.sources.join(", ")})` : "🔎 Checked online");
+  } else {
+    parts.push("⚠️ Couldn't search online (web search isn't enabled for this API key's organization) — identified from the photo only, so double-check the size");
+  }
+  if (r.confidence === "low") parts.push("Not sure about this one — please check the name and size");
+  else if (r.confidence === "medium") parts.push("Fairly sure — worth a quick check");
+  if (r.details) parts.push(r.details);
+  return parts.join(" · ");
+}
+
+function openMaterialSheet(projectId) {
+  const state = {
+    photo: null, // { dataUrl, file }
+    voice: null, // { blob, dataUrl, mimeType, transcript, startedAt }
+    recorder: null,
+    recording: false,
+    identifying: false, // AI looking at the photo / searching online
+    noting: false, // AI writing up the voice note
+    aiNote: "",
+    noteMsg: "",
+    item: "",
+    dims: "",
+    qty: "",
+    status: "To buy",
+    note: "",
+    itemTouched: false, // once the user edits a field by hand, AI never overwrites it
+    dimsTouched: false,
+    qtyTouched: false,
+    noteTouched: false,
+    searched: false,
+    sources: [],
+    saving: false
+  };
+  let closed = false;
+  let photoRun = 0; // bumped per analysis so a stale result can't overwrite a newer one
+  let noteRun = 0;
+
+  const draw = () => {
+    if (closed) return;
+    const busy = state.identifying || state.noting;
+    const canSave = !!state.item.trim() && !state.recording && !busy && !state.saving;
+
+    const photoBlock = `
+      ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Material photo">` : ""}
+      <button class="btn ghost" id="m-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
+    `;
+
+    let voiceBlock;
+    if (state.recording) {
+      voiceBlock = `
+        <div class="rec-indicator"><span class="dot"></span><span>Recording… say what you need</span></div>
+        <button class="btn primary" id="m-stop">⏹ Stop recording</button>
+      `;
+    } else if (state.voice) {
+      voiceBlock = `
+        <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
+        <button class="btn ghost" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Re-record</button>
+      `;
+    } else {
+      voiceBlock = `<button class="btn ghost" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Record voice note</button>`;
+    }
+
+    const noteBlock =
+      state.voice && !state.recording
+        ? `
+        <div class="field">
+          <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
+          <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
+        </div>
+        ${state.noting ? `<p class="empty" style="text-align:left;">🤖 AI is writing up the note…</p>` : ""}
+        ${state.noteMsg ? `<p class="empty" style="text-align:left;">${escapeHtml(state.noteMsg)}</p>` : ""}
+      `
+        : "";
+
+    $sheet.innerHTML = `
+      <h2>Material</h2>
+      <div class="field"><label>1 · Photo</label>${photoBlock}</div>
+      ${state.identifying ? `<p class="empty" style="text-align:left;">🤖 AI is identifying the material and searching online for its size… this can take up to a minute.</p>` : ""}
+      ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
+      <div class="field"><label>Item</label><input id="f-item" value="${escapeHtml(state.item)}" placeholder='e.g. "2x4x8 stud" or "Hard pipe duct, 6&quot;"'></div>
+      <div class="field"><label>Size / dimensions</label><input id="f-dims" value="${escapeHtml(state.dims)}" placeholder='e.g. 1.5" x 3.5" x 96"'></div>
+      <div class="field"><label>Quantity</label><input id="f-qty" value="${escapeHtml(state.qty)}" placeholder='e.g. 12, or "2 boxes"'></div>
+      <div class="field"><label>Status</label>
+        <select id="f-status">${MATERIAL_STATUSES.map((s) => `<option ${s === state.status ? "selected" : ""}>${s}</option>`).join("")}</select>
+      </div>
+      <div class="field"><label>2 · Voice note (optional)</label>${voiceBlock}</div>
+      ${noteBlock}
+      <div class="sheet-actions">
+        <button class="btn ghost" id="m-cancel">Cancel</button>
+        <button class="btn primary" id="m-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : busy ? "Working…" : "Save Material"}</button>
+      </div>
+    `;
+    wire();
+  };
+
+  const wire = () => {
+    const $ = (id) => document.getElementById(id);
+    $("m-cancel")?.addEventListener("click", closeSheet);
+    $("m-photo")?.addEventListener("click", takePhoto);
+    $("m-rec")?.addEventListener("click", startRecording);
+    $("m-stop")?.addEventListener("click", stopRecording);
+    $("m-save")?.addEventListener("click", save);
+    // Keep state in sync as the user types, so redraws never lose edits. The
+    // Save button is updated in place (no redraw while typing).
+    const syncSave = () => {
+      const btn = $("m-save");
+      if (!btn) return;
+      const busy = state.identifying || state.noting;
+      const ok = !!state.item.trim() && !state.recording && !busy && !state.saving;
+      btn.disabled = !ok;
+      btn.style.opacity = ok ? "" : ".5";
+    };
+    $("f-item")?.addEventListener("input", (e) => { state.item = e.target.value; state.itemTouched = true; syncSave(); });
+    $("f-dims")?.addEventListener("input", (e) => { state.dims = e.target.value; state.dimsTouched = true; });
+    $("f-qty")?.addEventListener("input", (e) => { state.qty = e.target.value; state.qtyTouched = true; });
+    $("f-status")?.addEventListener("change", (e) => { state.status = e.target.value; });
+    $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
+  };
+
+  const takePhoto = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.capture = "environment";
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (!file || closed) return;
+      let dataUrl;
+      try {
+        dataUrl = await fileToDataUrl(file);
+      } catch {
+        toast("Couldn't read that photo");
+        return;
+      }
+      if (closed) return;
+      state.photo = { dataUrl, file };
+      draw();
+      runIdentify();
+    });
+    input.click();
+  };
+
+  const runIdentify = async () => {
+    if (!state.photo) return;
+    if (!aiConfigured()) {
+      state.aiNote = "Add a Claude API key in Settings to have AI identify the material and look up its size online. Fill it in by hand for now.";
+      draw();
+      return;
+    }
+    const run = ++photoRun;
+    state.identifying = true;
+    state.aiNote = "";
+    draw();
+    try {
+      const r = await withTimeout(identifyMaterial(state.photo.dataUrl), 60000, "it took too long");
+      if (closed || run !== photoRun) return;
+      if (!state.itemTouched && r.item) state.item = r.item;
+      if (!state.dimsTouched) state.dims = r.dimensions;
+      state.searched = r.searched;
+      state.sources = r.sources;
+      state.aiNote = describeMaterialLookup(r);
+    } catch (err) {
+      if (closed || run !== photoRun) return;
+      state.aiNote = `AI couldn't identify this one (${err.message}). Type the item by hand.`;
+    }
+    state.identifying = false;
+    draw();
+  };
+
+  const startRecording = async () => {
+    try {
+      state.recorder = await startVoiceRecorder();
+    } catch (err) {
+      toast(err.message === "Microphone not available in this browser" ? err.message : "Microphone permission denied");
+      return;
+    }
+    if (closed) {
+      state.recorder.cancel();
+      state.recorder = null;
+      return;
+    }
+    state.recording = true;
+    draw();
+  };
+
+  const stopRecording = async () => {
+    const rec = state.recorder;
+    if (!rec) return;
+    state.recorder = null;
+    const stopBtn = document.getElementById("m-stop");
+    if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = "Finishing…"; }
+    let result = null;
+    try {
+      result = await rec.stop();
+    } catch (err) {
+      console.error("Stopping recording failed", err);
+    }
+    state.recording = false;
+    if (closed) return;
+    if (!result) {
+      toast("Nothing was recorded — try again");
+      draw();
+      return;
+    }
+    state.voice = result;
+    state.note = result.transcript; // editable; AI tidies it below
+    state.noteTouched = false;
+    state.noteMsg = "";
+    draw();
+    runNoteCleanup();
+  };
+
+  const runNoteCleanup = async () => {
+    if (!state.voice || !state.voice.transcript || !aiConfigured()) return;
+    const run = ++noteRun;
+    state.noting = true;
+    draw();
+    try {
+      const r = await withTimeout(cleanMaterialNote(state.voice.transcript, state.item), 30000, "it took too long");
+      if (closed || run !== noteRun) return;
+      if (!state.noteTouched && r.note) state.note = r.note;
+      if (!state.qtyTouched && r.quantity) state.qty = r.quantity;
+    } catch (err) {
+      if (closed || run !== noteRun) return;
+      state.noteMsg = "AI couldn't tidy the note — it's kept exactly as transcribed.";
+    }
+    state.noting = false;
+    draw();
+  };
+
+  const save = async () => {
+    const item = state.item.trim();
+    if (!item) {
+      toast("Add an item name");
+      return;
+    }
+    if (state.recording || state.identifying || state.noting || state.saving) return;
+    state.saving = true;
+    draw();
+    try {
+      const now = Date.now();
+      const materialId = MossDB.uid();
+      const photoId = state.photo ? MossDB.uid() : null;
+      const voiceId = state.voice ? MossDB.uid() : null;
+      const dims = state.dims.trim();
+      const note = state.note.trim();
+      const photoFile = state.photo ? state.photo.file : null;
+      const voiceBlob = state.voice ? state.voice.blob : null;
+      // Unique file names: phones often name every camera photo "image.jpg",
+      // which would overwrite earlier photos in OneDrive.
+      const extOfPhoto = photoFile
+        ? { "image/png": "png", "image/heic": "heic", "image/heif": "heif", "image/webp": "webp" }[photoFile.type] || "jpg"
+        : "jpg";
+      const photoName = `material-photo-${now}.${extOfPhoto}`;
+      const voiceName = state.voice ? `material-voice-${now}.${state.voice.mimeType.includes("mp4") ? "m4a" : "webm"}` : "";
+
+      if (state.photo) {
+        await MossDB.captures.add({
+          id: photoId,
+          projectId,
+          type: "photo",
+          dataUrl: state.photo.dataUrl,
+          name: state.photo.file.name,
+          remoteFileName: photoName,
+          caption: dims ? `${item} — ${dims}` : item,
+          materialId
+        });
+      }
+      if (state.voice) {
+        await MossDB.captures.add({
+          id: voiceId,
+          projectId,
+          type: "voice",
+          dataUrl: state.voice.dataUrl,
+          transcript: note || state.voice.transcript || null,
+          remoteFileName: voiceName,
+          materialId
+        });
+      }
+      await MossDB.captures.add({
+        id: materialId,
+        projectId,
+        type: "material",
+        name: item,
+        dimensions: dims,
+        quantity: state.qty.trim(),
+        status: MATERIAL_STATUSES.includes(state.status) ? state.status : "To buy",
+        note,
+        recordedAt: state.voice ? state.voice.startedAt.toISOString() : null,
+        photoId,
+        voiceId,
+        searchedOnline: state.searched,
+        sources: state.sources
+      });
+
+      closeSheet();
+      toast("Material saved");
+      if (currentRoute().name === "project" || currentRoute().name === "home") render();
+
+      // Best-effort OneDrive copy of the files; announce them to other
+      // devices only once everything has actually finished uploading.
+      const uploads = [];
+      if (photoFile) uploads.push(syncCaptureToOneDrive(projectId, "photo", photoFile, photoName));
+      if (voiceBlob) uploads.push(syncCaptureToOneDrive(projectId, "voice", voiceBlob, voiceName));
+      if (uploads.length) Promise.all(uploads).then(() => syncCapturesWithOneDrive());
+    } catch (err) {
+      console.error("Saving material failed", err);
+      state.saving = false;
+      toast("Couldn't save the material — try again");
+      draw();
+    }
+  };
+
+  openSheet("", () => {
+    // Runs whenever the sheet goes away (Cancel, backdrop tap, navigation,
+    // or after a successful save): always release the microphone.
+    closed = true;
+    photoRun++;
+    noteRun++;
+    if (state.recorder) {
+      state.recorder.cancel();
+      state.recorder = null;
+    }
+  });
+  draw();
+}
+
+// Opens a saved material with its photo, specs, written note and voice note.
+function openMaterialDetail(material, captures) {
+  const photo = captures.find((c) => c.id === material.photoId);
+  const voice = captures.find((c) => c.id === material.voiceId);
+  const facts = [material.dimensions, material.quantity ? `Qty ${material.quantity}` : "", material.status].filter(Boolean);
+  openSheet(`
+    <h2>${escapeHtml(material.name)}</h2>
+    ${facts.length ? `<span class="desc">${facts.map(escapeHtml).join(" · ")}</span>` : ""}
+    ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Material photo">` : ""}
+    ${
+      material.note
+        ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${
+            material.recordedAt ? `<span class="desc">${escapeHtml(issueStamp(new Date(material.recordedAt)))}</span><br>` : ""
+          }${escapeHtml(material.note)}</div>`
+        : ""
+    }
+    ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
+    ${material.sources && material.sources.length ? `<span class="desc">Checked online: ${material.sources.map(escapeHtml).join(", ")}</span>` : ""}
+    ${closeButton()}
+  `);
+  wireCloseButton();
+}
+
+// Shopping-list PDF: pick which materials to include (the ones marked "To
+// buy" start checked), then build, then share/open — same two-step flow as
+// the issues PDF. `projectId` limits it to one project; null = all projects.
+async function openMaterialsPdfSheet(projectId) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject).filter((p) => !projectId || p.id === projectId);
+  const groups = [];
+  for (const p of projects) {
+    const captures = await MossDB.captures.forProject(p.id);
+    const materials = captures
+      .filter((c) => c.type === "material")
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    if (materials.length) groups.push({ project: p, captures, materials });
+  }
+  if (!groups.length) {
+    toast("No materials to put in a list yet");
+    return;
+  }
+
+  openSheet(`
+    <h2>Shopping list PDF</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Choose what goes on the list. Items marked "To buy" start checked.</p>
+    ${groups
+      .map(
+        (g) => `
+      ${projectId ? "" : `<div class="section-label">${escapeHtml(g.project.name)}</div>`}
+      <div class="card card-list">
+        ${g.materials
+          .map(
+            (m) => `
+          <label class="row" style="cursor:pointer; gap:12px;">
+            <input type="checkbox" data-mid="${escapeHtml(m.id)}" ${m.status === "To buy" ? "checked" : ""} style="width:20px; height:20px; flex:none;">
+            <span class="main"><span class="title">${escapeHtml(m.name)}</span><span class="desc">${[m.dimensions, m.quantity ? "Qty " + m.quantity : "", m.status || ""].filter(Boolean).map(escapeHtml).join(" · ")}${m.photoId ? " · 📷" : ""}</span></span>
+          </label>`
+          )
+          .join("")}
+      </div>`
+      )
+      .join("")}
     <div class="sheet-actions">
-      <button class="btn ghost" id="cancel">Cancel</button>
-      <button class="btn primary" id="save">Save</button>
+      <button class="btn ghost" id="pdf-cancel">Cancel</button>
+      <button class="btn primary" id="pdf-create">Create PDF</button>
     </div>
   `);
-  document.getElementById("cancel").addEventListener("click", closeSheet);
-  document.getElementById("save").addEventListener("click", async () => {
-    const item = document.getElementById("f-item").value.trim();
-    if (!item) { toast("Add an item name"); return; }
-    await MossDB.captures.add({ projectId, type: "material", name: item, status: document.getElementById("f-status").value });
-    closeSheet();
-    toast("Material logged");
-    if (currentRoute().name === "project") render();
+  document.getElementById("pdf-cancel").addEventListener("click", closeSheet);
+  document.getElementById("pdf-create").addEventListener("click", async () => {
+    const chosen = new Set([...$sheet.querySelectorAll("[data-mid]")].filter((el) => el.checked).map((el) => el.dataset.mid));
+    if (!chosen.size) {
+      toast("Select at least one material");
+      return;
+    }
+    const btn = document.getElementById("pdf-create");
+    btn.disabled = true;
+    btn.textContent = "Building PDF…";
+    try {
+      const sections = [];
+      for (const g of groups) {
+        const picked = g.materials.filter((m) => chosen.has(m.id));
+        if (!picked.length) continue;
+        sections.push({
+          projectName: g.project.name,
+          address: g.project.address || "",
+          items: picked.map((m) => ({
+            name: m.name,
+            dimensions: m.dimensions || "",
+            quantity: m.quantity || "",
+            status: m.status || "",
+            note: m.note || "",
+            stamp: m.recordedAt ? issueStamp(new Date(m.recordedAt)) : "",
+            photoDataUrl: g.captures.find((c) => c.id === m.photoId)?.dataUrl || null
+          }))
+        });
+      }
+      const blob = await buildMaterialsPdf(sections);
+      const day = new Date().toISOString().slice(0, 10);
+      const label = sections.length === 1 ? sections[0].projectName : "All projects";
+      const fileName = `Shopping list - ${label} - ${day}.pdf`.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ");
+      showPdfReady(blob, fileName, sections.reduce((n, s) => n + s.items.length, 0), "item");
+    } catch (err) {
+      console.error("Materials PDF build failed", err);
+      toast("Couldn't build the PDF — try again");
+      btn.disabled = false;
+      btn.textContent = "Create PDF";
+    }
   });
 }
 
