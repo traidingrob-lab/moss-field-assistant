@@ -200,6 +200,24 @@ async function buildIssuesPdf(sections, opts = {}) {
         y += 14;
       }
 
+      // Spanish <-> English translation of the note, when there is one.
+      const tr = pdfSafe(issue.translation).trim();
+      if (tr) {
+        y += 4;
+        font("bold", 9);
+        color(SOFT);
+        ensure(13);
+        doc.text(pdfSafe(issue.translationLabel || "Translation"), M, y + 9);
+        y += 13;
+        font("italic", 10.5);
+        color(INK);
+        for (const line of doc.splitTextToSize(tr, contentW)) {
+          ensure(14);
+          doc.text(line, M, y + 10);
+          y += 14;
+        }
+      }
+
       y += 10;
       // Separator line — skipped when the next issue starts a new page anyway,
       // so a stray line is never left alone at the top of a page.
@@ -332,11 +350,15 @@ async function buildMaterialsPdf(sections, opts = {}) {
       if (note.length > 1200) note = note.slice(0, 1200).trimEnd() + "...";
       font("normal", 9.5);
       const noteL = note ? doc.splitTextToSize(note, textW) : [];
+      let trText = pdfSafe(item.translation).trim();
+      if (trText.length > 1200) trText = trText.slice(0, 1200).trimEnd() + "...";
+      font("italic", 9.5);
+      const trL = trText ? doc.splitTextToSize(trText, textW) : [];
       font("normal", 8.5);
       const stampL = item.stamp ? doc.splitTextToSize(pdfSafe(item.stamp), textW) : [];
 
       const textH =
-        nameL.length * 14.5 + dimL.length * 12.5 + (qtyText ? 13 : 0) + noteL.length * 12 + stampL.length * 10.5 + 6;
+        nameL.length * 14.5 + dimL.length * 12.5 + (qtyText ? 13 : 0) + noteL.length * 12 + (trL.length ? 12 + trL.length * 12 : 0) + stampL.length * 10.5 + 6;
       const rowH = Math.max(textH, ph, BOX + 4);
       ensure(rowH + 14);
 
@@ -374,6 +396,16 @@ async function buildMaterialsPdf(sections, opts = {}) {
         color(INK);
         doc.text(noteL, textX, ty + 9);
         ty += noteL.length * 12;
+      }
+      if (trL.length) {
+        font("bold", 8.5);
+        color(SOFT);
+        doc.text(pdfSafe(item.translationLabel || "Translation"), textX, ty + 9);
+        ty += 12;
+        font("italic", 9.5);
+        color(INK);
+        doc.text(trL, textX, ty + 9);
+        ty += trL.length * 12;
       }
       if (stampL.length) {
         font("normal", 8.5);

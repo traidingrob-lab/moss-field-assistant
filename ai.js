@@ -54,6 +54,29 @@ function setAiCaptions(enabled) {
   }
 }
 
+// Whether voice notes get an automatic Spanish <-> English translation shown
+// under the note. On by default once a key is saved; Settings has the switch.
+// Only affects NEW voice notes — saved translations stay as they are.
+const AI_TRANSLATE_STORAGE = "moss_ai_translate";
+
+function aiTranslateEnabled() {
+  if (!aiConfigured()) return false;
+  try {
+    return localStorage.getItem(AI_TRANSLATE_STORAGE) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function setAiTranslate(enabled) {
+  try {
+    if (enabled) localStorage.removeItem(AI_TRANSLATE_STORAGE);
+    else localStorage.setItem(AI_TRANSLATE_STORAGE, "off");
+  } catch {
+    // localStorage unavailable — the switch just won't stick; harmless.
+  }
+}
+
 function setAiKey(key) {
   try {
     if (key) localStorage.setItem(AI_KEY_STORAGE, key);
@@ -385,3 +408,31 @@ async function identifyMaterial(dataUrl, transcript = "") {
   };
 }
 
+
+
+// Translates a voice note between Spanish and English: Spanish -> English,
+// English -> Spanish. (Anything else is translated to English.) Returns
+// { lang, target, translation } where `target` is the language of the
+// translation ("en" or "es"), or null if there is nothing to translate
+// (empty text, or the model returned the same text). Throws on API failure.
+async function translateVoiceNote(text) {
+  const t = String(text || "").trim();
+  if (!t) return null;
+  const prompt =
+    "Translate this construction job-site voice note between Spanish and English.\n" +
+    "If it is in Spanish, translate it to English. If it is in English, translate it to Spanish. " +
+    "If it mixes both, translate everything into the language that is NOT the main one. " +
+    "If it is in some other language, translate it to English.\n" +
+    "Keep it natural and faithful: use correct construction/trade terms, keep numbers, measurements, names and brands exactly, " +
+    "and do not add, remove or explain anything.\n" +
+    `Voice note:\n"""${t}"""\n` +
+    'Reply with ONLY a JSON object: {"language": "es" or "en" or "other" (the language of the original), "translation": "<the translation>"}';
+  const reply = await callClaude(prompt, 1000);
+  const parsed = parseJsonReply(reply);
+  if (!parsed || typeof parsed.translation !== "string") throw new Error("AI reply wasn't readable.");
+  const translation = parsed.translation.trim();
+  const lang = String(parsed.language || "").toLowerCase().slice(0, 2);
+  const target = lang === "en" ? "es" : "en";
+  if (!translation || translation.toLowerCase() === t.toLowerCase()) return null;
+  return { lang: lang === "es" || lang === "en" ? lang : "other", target, translation };
+}

@@ -379,6 +379,10 @@ async function syncCapturesWithOneDrive() {
           const patch = {};
           if (rc.caption && !lc.caption) patch.caption = rc.caption;
           if (rc.transcript && !lc.transcript) patch.transcript = rc.transcript;
+          if (rc.translation && !lc.translation) {
+            patch.translation = rc.translation;
+            patch.translationLang = rc.translationLang;
+          }
           if (Object.keys(patch).length) {
             const updated = await MossDB.captures.update(lc.id, patch);
             if (updated) byId.set(lc.id, updated);
@@ -780,6 +784,7 @@ async function renderDashboard(id) {
                 ? `<span class="desc" style="font-style:italic;">"${escapeHtml(v.transcript)}"</span>`
                 : `<span class="desc" style="opacity:.6;">No transcript (speech-to-text wasn't available when this was recorded).</span>`
             }
+            ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
           </div>`
                 )
                 .join("")
@@ -1049,6 +1054,17 @@ async function renderSettings() {
         }</span></span>
         <input type="checkbox" class="switch" id="f-ai-captions" ${aiCaptionsEnabled() ? "checked" : ""} ${aiConfigured() ? "" : "disabled"} aria-label="AI photo descriptions">
       </div>
+      <div class="row">
+        <span class="icon">🌐</span>
+        <span class="main"><span class="title">AI translate voice notes</span><span class="desc">${
+          !aiConfigured()
+            ? "Add a Claude API key above to use this"
+            : aiTranslateEnabled()
+            ? "On — Spanish notes get an English translation, English notes get Spanish"
+            : "Off — voice notes are not translated"
+        }</span></span>
+        <input type="checkbox" class="switch" id="f-ai-translate" ${aiTranslateEnabled() ? "checked" : ""} ${aiConfigured() ? "" : "disabled"} aria-label="AI translate voice notes">
+      </div>
       <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
         <span class="main"><span class="icon">🎙️</span> <span class="title">Voice note language</span><span class="desc">What language you dictate voice notes in, for transcription</span></span>
         <select id="f-voice-lang" style="width:100%;">
@@ -1093,6 +1109,12 @@ async function renderSettings() {
   document.getElementById("f-ai-captions").addEventListener("change", (e) => {
     setAiCaptions(e.target.checked);
     toast(e.target.checked ? "AI photo descriptions on" : "AI photo descriptions off");
+    renderSettings();
+  });
+
+  document.getElementById("f-ai-translate").addEventListener("change", (e) => {
+    setAiTranslate(e.target.checked);
+    toast(e.target.checked ? "AI voice note translation on" : "AI voice note translation off");
     renderSettings();
   });
 
@@ -1332,9 +1354,18 @@ async function captureVoice(projectId) {
         // from OneDrive later (hydrateRemoteCapture).
         const ext = (recorder.mimeType || "audio/webm").includes("mp4") ? "m4a" : "webm";
         const remoteFileName = `voice-${Date.now()}.${ext}`;
-        await MossDB.captures.add({ projectId, type: "voice", dataUrl, transcript: finalTranscript, remoteFileName });
+        const savedVoice = await MossDB.captures.add({ projectId, type: "voice", dataUrl, transcript: finalTranscript, remoteFileName });
         toast(finalTranscript ? "Voice note saved (transcribed)" : "Voice note saved");
         if (currentRoute().name === "project") render();
+        // Spanish <-> English translation (if switched on) is added a moment
+        // later, once the AI answers; the note is already saved without it.
+        const translatePromise = finalTranscript
+          ? tryTranslate(finalTranscript).then(async (tr) => {
+              if (!tr) return;
+              await MossDB.captures.update(savedVoice.id, { translation: tr.translation, translationLang: tr.target });
+              if (currentRoute().name === "project") render();
+            })
+          : Promise.resolve();
         // Same ordering reason as capturePhoto: don't advertise this
         // remoteFileName to other devices until the real file has actually
         // finished uploading.
@@ -1344,7 +1375,7 @@ async function captureVoice(projectId) {
         // or nothing recognized) — same reasoning as capturePhoto above:
         // otherwise this voice note stays invisible to other devices until
         // this device's app happens to reload.
-        uploadPromise.then(() => syncCapturesWithOneDrive());
+        Promise.all([uploadPromise, translatePromise]).then(() => syncCapturesWithOneDrive());
       });
     };
 
@@ -1486,6 +1517,10 @@ function openIssueSheet(projectId) {
     analyzing: false,
     aiNote: "", // shown when AI couldn't run / failed
     description: "", // AI's one-line description of the photo
+    translation: "", // Spanish <-> English translation of the note (if switched on)
+    translationLang: "",
+    translatedFrom: "", // the note text the translation belongs to
+    translating: false,
     title: "",
     trade: "General",
     note: "",
@@ -1496,11 +1531,12 @@ function openIssueSheet(projectId) {
   };
   let closed = false;
   let analysisRun = 0; // bumped on every analysis so a stale result can't overwrite a newer one
+  let translateRun = 0;
 
   const draw = () => {
     if (closed) return;
     const haveBoth = !!(state.photo && state.voice);
-    const canSave = haveBoth && !state.recording && !state.analyzing && !state.saving;
+    const canSave = haveBoth && !state.recording && !state.analyzing && !state.translating && !state.saving;
 
     const photoBlock = `
       ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Issue photo">` : ""}
@@ -1531,6 +1567,7 @@ function openIssueSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang)}
         <div class="field">
           <label>Trade</label>
           <select id="f-trade">${TRADES.map((t) => `<option ${t === state.trade ? "selected" : ""}>${t}</option>`).join("")}</select>
@@ -1551,7 +1588,7 @@ function openIssueSheet(projectId) {
       ${detailsBlock}
       <div class="sheet-actions">
         <button class="btn ghost" id="i-cancel">Cancel</button>
-        <button class="btn primary" id="i-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : state.analyzing ? "Analyzing…" : "Save Issue"}</button>
+        <button class="btn primary" id="i-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : state.analyzing ? "Analyzing…" : state.translating ? "Translating…" : "Save Issue"}</button>
       </div>
     `;
     wire();
@@ -1633,8 +1670,34 @@ function openIssueSheet(projectId) {
     state.note = result.transcript; // editable; AI cleans it up below
     state.noteTouched = false;
     state.aiNote = "";
+    state.translation = "";
+    state.translatedFrom = "";
+    translateRun++;
+    state.translating = false;
     draw();
     runAnalysis();
+  };
+
+  // Spanish <-> English translation of the final note (only when switched on).
+  const runTranslate = async () => {
+    const run = ++translateRun;
+    const text = state.note.trim();
+    if (!aiTranslateEnabled() || !text) {
+      state.translating = false;
+      state.translation = "";
+      state.translatedFrom = "";
+      draw();
+      return;
+    }
+    state.translating = true;
+    draw();
+    const tr = await tryTranslate(text);
+    if (closed || run !== translateRun) return;
+    state.translation = tr ? tr.translation : "";
+    state.translationLang = tr ? tr.target : "";
+    state.translatedFrom = text;
+    state.translating = false;
+    draw();
   };
 
   const runAnalysis = async () => {
@@ -1672,13 +1735,24 @@ function openIssueSheet(projectId) {
     }
     state.analyzing = false;
     draw();
+    runTranslate();
   };
 
   const save = async () => {
-    if (!state.photo || !state.voice || state.recording || state.analyzing || state.saving) return;
+    if (!state.photo || !state.voice || state.recording || state.analyzing || state.translating || state.saving) return;
     state.saving = true;
     draw();
     try {
+      // The note may have been edited after it was translated: refresh the
+      // translation so the saved pair always matches (skipped if it fails).
+      if (aiTranslateEnabled() && state.note.trim() && state.note.trim() !== state.translatedFrom) {
+        const tr = await tryTranslate(state.note.trim());
+        state.translation = tr ? tr.translation : "";
+        state.translationLang = tr ? tr.target : "";
+        state.translatedFrom = state.note.trim();
+      } else if (!state.note.trim()) {
+        state.translation = "";
+      }
       const now = Date.now();
       const extOfPhoto = { "image/png": "png", "image/heic": "heic", "image/heif": "heif", "image/webp": "webp" }[state.photo.file.type] || "jpg";
       const extOfVoice = state.voice.mimeType.includes("mp4") ? "m4a" : "webm";
@@ -1711,7 +1785,8 @@ function openIssueSheet(projectId) {
         dataUrl: state.voice.dataUrl,
         transcript: note || state.voice.transcript || null,
         remoteFileName: voiceName,
-        issueId
+        issueId,
+        ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
       });
       await MossDB.issues.add({
         id: issueId,
@@ -1721,7 +1796,8 @@ function openIssueSheet(projectId) {
         requirement: note ? `${stamp}\n${note}` : stamp,
         photoId,
         voiceId,
-        recordedAt: state.voice.startedAt.toISOString()
+        recordedAt: state.voice.startedAt.toISOString(),
+        ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
       });
 
       const photoFile = state.photo.file;
@@ -1749,6 +1825,7 @@ function openIssueSheet(projectId) {
     // or after a successful save): always release the microphone.
     closed = true;
     analysisRun++;
+    translateRun++;
     if (state.recorder) {
       state.recorder.cancel();
       state.recorder = null;
@@ -1766,6 +1843,7 @@ function openIssueDetail(issue, captures) {
     <span class="desc">${escapeHtml(issue.trade)}</span>
     ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Issue photo">` : ""}
     ${issue.requirement ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(issue.requirement)}</div>` : ""}
+    ${translationCardHtml(issue.translation, issue.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${closeButton()}
   `);
@@ -1793,7 +1871,15 @@ function issuePdfData(issue, captures) {
     stamp = issue.createdAt ? issueStamp(new Date(issue.createdAt)) : "";
     note = req;
   }
-  return { title: issue.title, trade: issue.trade, stamp, note, photoDataUrl: photo?.dataUrl || null };
+  return {
+    title: issue.title,
+    trade: issue.trade,
+    stamp,
+    note,
+    translation: issue.translation || "",
+    translationLabel: issue.translation ? translationLabel(issue.translationLang) : "",
+    photoDataUrl: photo?.dataUrl || null
+  };
 }
 
 async function openIssuesPdfSheet(projectId) {
@@ -1924,6 +2010,31 @@ function showPdfReady(blob, fileName, count, noun = "issue") {
   });
 }
 
+// ---------- Voice note translation (Spanish <-> English) ----------
+// Controlled by the Settings switch (aiTranslateEnabled). The translation is
+// saved next to the note as `translation` + `translationLang` (the language
+// the translation is IN: "en" or "es").
+function translationLabel(lang) {
+  return lang === "es" ? "Traducción al español" : "English translation";
+}
+
+function translationCardHtml(text, lang) {
+  if (!text) return "";
+  return `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;"><span class="desc">🌐 ${escapeHtml(translationLabel(lang))}</span><br>${escapeHtml(text)}</div>`;
+}
+
+// Never throws: returns { translation, target } or null (switch off, no key,
+// nothing to translate, or the AI failed / took too long).
+async function tryTranslate(text) {
+  if (!aiTranslateEnabled() || !String(text || "").trim()) return null;
+  try {
+    return await withTimeout(translateVoiceNote(text), 20000, "it took too long");
+  } catch (err) {
+    console.error("Translation failed", err);
+    return null;
+  }
+}
+
 // ---------- Materials: photo + AI online lookup + voice note ----------
 // Flow: take a photo → record a voice note → ONE AI call combines the photo
 // and what was said, searches online, and fills the name, size, quantity and
@@ -1963,6 +2074,10 @@ function openMaterialSheet(projectId) {
     identifying: false, // AI looking at photo + voice note, searching online
     aiRan: false,
     aiNote: "",
+    translation: "",
+    translationLang: "",
+    translatedFrom: "",
+    translating: false,
     item: "",
     dims: "",
     qty: "",
@@ -1978,10 +2093,11 @@ function openMaterialSheet(projectId) {
   };
   let closed = false;
   let aiRun = 0; // bumped per analysis so a stale result can't overwrite a newer one
+  let translateRun = 0;
 
   const draw = () => {
     if (closed) return;
-    const busy = state.identifying;
+    const busy = state.identifying || state.translating;
     const canSave = !!state.item.trim() && !state.recording && !busy && !state.saving;
 
     const photoBlock = `
@@ -2028,6 +2144,7 @@ function openMaterialSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang)}
       `
         : "";
 
@@ -2064,7 +2181,7 @@ function openMaterialSheet(projectId) {
     const syncSave = () => {
       const btn = $("m-save");
       if (!btn) return;
-      const ok = !!state.item.trim() && !state.recording && !state.identifying && !state.saving;
+      const ok = !!state.item.trim() && !state.recording && !state.identifying && !state.translating && !state.saving;
       btn.disabled = !ok;
       btn.style.opacity = ok ? "" : ".5";
     };
@@ -2132,6 +2249,29 @@ function openMaterialSheet(projectId) {
     state.aiRan = true;
     state.identifying = false;
     draw();
+    runTranslate();
+  };
+
+  // Spanish <-> English translation of the final note (only when switched on).
+  const runTranslate = async () => {
+    const run = ++translateRun;
+    const text = state.voice ? state.note.trim() : "";
+    if (!aiTranslateEnabled() || !text) {
+      state.translating = false;
+      state.translation = "";
+      state.translatedFrom = "";
+      draw();
+      return;
+    }
+    state.translating = true;
+    draw();
+    const tr = await tryTranslate(text);
+    if (closed || run !== translateRun) return;
+    state.translation = tr ? tr.translation : "";
+    state.translationLang = tr ? tr.target : "";
+    state.translatedFrom = text;
+    state.translating = false;
+    draw();
   };
 
   const startRecording = async () => {
@@ -2174,6 +2314,10 @@ function openMaterialSheet(projectId) {
     state.noteTouched = false;
     state.aiNote = "";
     state.aiRan = false;
+    state.translation = "";
+    state.translatedFrom = "";
+    translateRun++;
+    state.translating = false;
     draw();
     runIdentify(); // photo + voice note → name, size, quantity, note
   };
@@ -2184,10 +2328,20 @@ function openMaterialSheet(projectId) {
       toast("Add an item name");
       return;
     }
-    if (state.recording || state.identifying || state.saving) return;
+    if (state.recording || state.identifying || state.translating || state.saving) return;
     state.saving = true;
     draw();
     try {
+      // The note may have been edited after it was translated: refresh the
+      // translation so the saved pair always matches (skipped if it fails).
+      if (state.voice && aiTranslateEnabled() && state.note.trim() && state.note.trim() !== state.translatedFrom) {
+        const tr = await tryTranslate(state.note.trim());
+        state.translation = tr ? tr.translation : "";
+        state.translationLang = tr ? tr.target : "";
+        state.translatedFrom = state.note.trim();
+      } else if (!state.note.trim() || !state.voice) {
+        state.translation = "";
+      }
       const now = Date.now();
       const materialId = MossDB.uid();
       const photoId = state.photo ? MossDB.uid() : null;
@@ -2224,7 +2378,8 @@ function openMaterialSheet(projectId) {
           dataUrl: state.voice.dataUrl,
           transcript: note || state.voice.transcript || null,
           remoteFileName: voiceName,
-          materialId
+          materialId,
+          ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
         });
       }
       await MossDB.captures.add({
@@ -2240,7 +2395,8 @@ function openMaterialSheet(projectId) {
         photoId,
         voiceId,
         searchedOnline: state.searched,
-        sources: state.sources
+        sources: state.sources,
+        ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
       });
 
       closeSheet();
@@ -2266,6 +2422,7 @@ function openMaterialSheet(projectId) {
     // or after a successful save): always release the microphone.
     closed = true;
     aiRun++;
+    translateRun++;
     if (state.recorder) {
       state.recorder.cancel();
       state.recorder = null;
@@ -2290,6 +2447,7 @@ function openMaterialDetail(material, captures) {
           }${escapeHtml(material.note)}</div>`
         : ""
     }
+    ${translationCardHtml(material.translation, material.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${material.sources && material.sources.length ? `<span class="desc">Checked online: ${material.sources.map(escapeHtml).join(", ")}</span>` : ""}
     ${closeButton()}
@@ -2368,6 +2526,8 @@ async function openMaterialsPdfSheet(projectId) {
             quantity: m.quantity || "",
             status: m.status || "",
             note: m.note || "",
+            translation: m.translation || "",
+            translationLabel: m.translation ? translationLabel(m.translationLang) : "",
             stamp: m.recordedAt ? issueStamp(new Date(m.recordedAt)) : "",
             photoDataUrl: g.captures.find((c) => c.id === m.photoId)?.dataUrl || null
           }))
