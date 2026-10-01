@@ -1925,13 +1925,11 @@ function showPdfReady(blob, fileName, count, noun = "issue") {
 }
 
 // ---------- Materials: photo + AI online lookup + voice note ----------
-// Flow: take a photo → AI identifies the product and searches online for its
-// real name and dimensions (fills the fields, all editable) → optionally
-// record a voice note → AI writes it up (cleans the transcript, pulls out a
-// quantity if one was said) → save. The photo and voice note are also saved
-// as normal captures linked to the material (materialId), so they sync to
-// OneDrive like any other photo / voice note. Photo and voice are optional:
-// a material can still be typed in by hand, as before.
+// Flow: take a photo → record a voice note → ONE AI call combines the photo
+// and what was said, searches online, and fills the name, size, quantity and
+// a written note → save. The photo and voice note are also saved as normal
+// captures linked to the material (materialId), so they sync to OneDrive like
+// any other photo / voice note. Typing a material in by hand still works.
 
 const MATERIAL_STATUSES = ["To buy", "Ordered", "Delivered", "Backordered"];
 
@@ -1962,10 +1960,9 @@ function openMaterialSheet(projectId) {
     voice: null, // { blob, dataUrl, mimeType, transcript, startedAt }
     recorder: null,
     recording: false,
-    identifying: false, // AI looking at the photo / searching online
-    noting: false, // AI writing up the voice note
+    identifying: false, // AI looking at photo + voice note, searching online
+    aiRan: false,
     aiNote: "",
-    noteMsg: "",
     item: "",
     dims: "",
     qty: "",
@@ -1980,32 +1977,48 @@ function openMaterialSheet(projectId) {
     saving: false
   };
   let closed = false;
-  let photoRun = 0; // bumped per analysis so a stale result can't overwrite a newer one
-  let noteRun = 0;
+  let aiRun = 0; // bumped per analysis so a stale result can't overwrite a newer one
 
   const draw = () => {
     if (closed) return;
-    const busy = state.identifying || state.noting;
+    const busy = state.identifying;
     const canSave = !!state.item.trim() && !state.recording && !busy && !state.saving;
 
     const photoBlock = `
       ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Material photo">` : ""}
-      <button class="btn ghost" id="m-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
+      <button class="btn ${state.photo ? "ghost" : "primary"}" id="m-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
     `;
 
     let voiceBlock;
-    if (state.recording) {
+    if (!state.photo) {
+      voiceBlock = `<button class="btn ghost" disabled>🎤 Take the photo first</button>`;
+    } else if (state.recording) {
       voiceBlock = `
-        <div class="rec-indicator"><span class="dot"></span><span>Recording… say what you need</span></div>
+        <div class="rec-indicator"><span class="dot"></span><span>Recording… say what the material is and how many you need</span></div>
         <button class="btn primary" id="m-stop">⏹ Stop recording</button>
       `;
     } else if (state.voice) {
       voiceBlock = `
         <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
-        <button class="btn ghost" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Re-record</button>
+        <button class="btn ghost" id="m-rec" ${state.saving || state.identifying ? "disabled" : ""}>🎤 Re-record</button>
       `;
     } else {
-      voiceBlock = `<button class="btn ghost" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Record voice note</button>`;
+      voiceBlock = `<button class="btn primary" id="m-rec" ${state.saving ? "disabled" : ""}>🎤 Record voice note</button>`;
+    }
+
+    let aiBlock = "";
+    if (state.photo && !state.recording) {
+      if (state.identifying) {
+        aiBlock = `<p class="empty" style="text-align:left;">🤖 AI is combining the photo${state.voice ? " and your voice note" : ""} and searching online… this can take up to a minute.</p>`;
+      } else {
+        const hint = !state.voice && !state.aiRan ? `<p class="empty" style="text-align:left;">Next: record a voice note — the AI will combine it with the photo.</p>` : "";
+        const label = state.aiRan ? "🤖 Run AI again" : state.voice ? "🤖 Find name & size with AI" : "🤖 Identify from photo only";
+        aiBlock = `
+          ${hint}
+          ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
+          <button class="btn ghost" id="m-ai" ${state.saving ? "disabled" : ""}>${label}</button>
+        `;
+      }
     }
 
     const noteBlock =
@@ -2015,23 +2028,20 @@ function openMaterialSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
-        ${state.noting ? `<p class="empty" style="text-align:left;">🤖 AI is writing up the note…</p>` : ""}
-        ${state.noteMsg ? `<p class="empty" style="text-align:left;">${escapeHtml(state.noteMsg)}</p>` : ""}
       `
         : "";
 
     $sheet.innerHTML = `
       <h2>Material</h2>
       <div class="field"><label>1 · Photo</label>${photoBlock}</div>
-      ${state.identifying ? `<p class="empty" style="text-align:left;">🤖 AI is identifying the material and searching online for its size… this can take up to a minute.</p>` : ""}
-      ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
+      <div class="field"><label>2 · Voice note</label>${voiceBlock}</div>
+      <div class="field"><label>3 · AI</label>${aiBlock || `<p class="empty" style="text-align:left;">Takes the photo + voice note and finds the name and size online.</p>`}</div>
       <div class="field"><label>Item</label><input id="f-item" value="${escapeHtml(state.item)}" placeholder='e.g. "2x4x8 stud" or "Hard pipe duct, 6&quot;"'></div>
       <div class="field"><label>Size / dimensions</label><input id="f-dims" value="${escapeHtml(state.dims)}" placeholder='e.g. 1.5" x 3.5" x 96"'></div>
       <div class="field"><label>Quantity</label><input id="f-qty" value="${escapeHtml(state.qty)}" placeholder='e.g. 12, or "2 boxes"'></div>
       <div class="field"><label>Status</label>
         <select id="f-status">${MATERIAL_STATUSES.map((s) => `<option ${s === state.status ? "selected" : ""}>${s}</option>`).join("")}</select>
       </div>
-      <div class="field"><label>2 · Voice note (optional)</label>${voiceBlock}</div>
       ${noteBlock}
       <div class="sheet-actions">
         <button class="btn ghost" id="m-cancel">Cancel</button>
@@ -2047,14 +2057,14 @@ function openMaterialSheet(projectId) {
     $("m-photo")?.addEventListener("click", takePhoto);
     $("m-rec")?.addEventListener("click", startRecording);
     $("m-stop")?.addEventListener("click", stopRecording);
+    $("m-ai")?.addEventListener("click", runIdentify);
     $("m-save")?.addEventListener("click", save);
     // Keep state in sync as the user types, so redraws never lose edits. The
     // Save button is updated in place (no redraw while typing).
     const syncSave = () => {
       const btn = $("m-save");
       if (!btn) return;
-      const busy = state.identifying || state.noting;
-      const ok = !!state.item.trim() && !state.recording && !busy && !state.saving;
+      const ok = !!state.item.trim() && !state.recording && !state.identifying && !state.saving;
       btn.disabled = !ok;
       btn.style.opacity = ok ? "" : ".5";
     };
@@ -2082,35 +2092,44 @@ function openMaterialSheet(projectId) {
       }
       if (closed) return;
       state.photo = { dataUrl, file };
+      state.aiNote = "";
+      state.aiRan = false;
       draw();
-      runIdentify();
+      // A new photo with a voice note already recorded: re-run the combined
+      // lookup. Otherwise wait for the voice note (step 2).
+      if (state.voice) runIdentify();
     });
     input.click();
   };
 
+  // ONE AI call that combines the photo and the voice-note transcript.
   const runIdentify = async () => {
-    if (!state.photo) return;
+    if (!state.photo || state.identifying) return;
     if (!aiConfigured()) {
-      state.aiNote = "Add a Claude API key in Settings to have AI identify the material and look up its size online. Fill it in by hand for now.";
+      state.aiNote = "Add a Claude API key in Settings to have AI find the name and size online. Fill it in by hand for now.";
       draw();
       return;
     }
-    const run = ++photoRun;
+    const run = ++aiRun;
     state.identifying = true;
     state.aiNote = "";
     draw();
+    const transcript = state.voice ? state.voice.transcript || "" : "";
     try {
-      const r = await withTimeout(identifyMaterial(state.photo.dataUrl), 60000, "it took too long");
-      if (closed || run !== photoRun) return;
+      const r = await withTimeout(identifyMaterial(state.photo.dataUrl, transcript), 60000, "it took too long");
+      if (closed || run !== aiRun) return;
       if (!state.itemTouched && r.item) state.item = r.item;
-      if (!state.dimsTouched) state.dims = r.dimensions;
+      if (!state.dimsTouched && r.dimensions) state.dims = r.dimensions;
+      if (!state.qtyTouched && r.quantity) state.qty = r.quantity;
+      if (state.voice && !state.noteTouched && r.note) state.note = r.note;
       state.searched = r.searched;
       state.sources = r.sources;
       state.aiNote = describeMaterialLookup(r);
     } catch (err) {
-      if (closed || run !== photoRun) return;
+      if (closed || run !== aiRun) return;
       state.aiNote = `AI couldn't identify this one (${err.message}). Type the item by hand.`;
     }
+    state.aiRan = true;
     state.identifying = false;
     draw();
   };
@@ -2151,29 +2170,12 @@ function openMaterialSheet(projectId) {
       return;
     }
     state.voice = result;
-    state.note = result.transcript; // editable; AI tidies it below
+    state.note = result.transcript; // the AI rewrites this below; stays as-is if the AI fails
     state.noteTouched = false;
-    state.noteMsg = "";
+    state.aiNote = "";
+    state.aiRan = false;
     draw();
-    runNoteCleanup();
-  };
-
-  const runNoteCleanup = async () => {
-    if (!state.voice || !state.voice.transcript || !aiConfigured()) return;
-    const run = ++noteRun;
-    state.noting = true;
-    draw();
-    try {
-      const r = await withTimeout(cleanMaterialNote(state.voice.transcript, state.item), 30000, "it took too long");
-      if (closed || run !== noteRun) return;
-      if (!state.noteTouched && r.note) state.note = r.note;
-      if (!state.qtyTouched && r.quantity) state.qty = r.quantity;
-    } catch (err) {
-      if (closed || run !== noteRun) return;
-      state.noteMsg = "AI couldn't tidy the note — it's kept exactly as transcribed.";
-    }
-    state.noting = false;
-    draw();
+    runIdentify(); // photo + voice note → name, size, quantity, note
   };
 
   const save = async () => {
@@ -2182,7 +2184,7 @@ function openMaterialSheet(projectId) {
       toast("Add an item name");
       return;
     }
-    if (state.recording || state.identifying || state.noting || state.saving) return;
+    if (state.recording || state.identifying || state.saving) return;
     state.saving = true;
     draw();
     try {
@@ -2263,8 +2265,7 @@ function openMaterialSheet(projectId) {
     // Runs whenever the sheet goes away (Cancel, backdrop tap, navigation,
     // or after a successful save): always release the microphone.
     closed = true;
-    photoRun++;
-    noteRun++;
+    aiRun++;
     if (state.recorder) {
       state.recorder.cancel();
       state.recorder = null;

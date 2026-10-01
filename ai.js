@@ -288,18 +288,31 @@ async function runWithSearch(messages, maxTokens, tools) {
   throw new Error("the online search took too long");
 }
 
-// Material photo → { item, dimensions, confidence, details, searched, sources }.
-// Asks Claude to identify the product in the photo and look up its real name
-// and dimensions online (Claude's web search tool — billed by Anthropic at
-// about $10 per 1,000 searches, at most 3 per photo here). If web search
-// isn't available (an organization admin can switch it off in the Claude
-// Console, which makes the API answer 400), it retries without it and says so
-// via `searched: false` — the identification then comes from the photo alone.
-async function identifyMaterial(dataUrl) {
+// Material photo + voice note → { item, dimensions, quantity, note, confidence,
+// details, searched, sources }. One request combines BOTH: the photo shows
+// what the product is, the dictated note often adds what the photo can't
+// (the exact name, brand or size, and how many are needed). Claude then uses
+// its web search tool to confirm the real product name and dimensions
+// (billed by Anthropic at about $10 per 1,000 searches, at most 3 per request
+// here). `transcript` may be empty — then it works from the photo alone.
+// If web search isn't available (an organization admin can switch it off in
+// the Claude Console, which makes the API answer 400), it retries without it
+// and reports `searched: false` — the answer then comes from the photo/note
+// alone.
+async function identifyMaterial(dataUrl, transcript = "") {
   const small = await downscaleImageForAI(dataUrl);
   const match = /^data:([^;]+);base64,(.*)$/.exec(small || "");
   if (!match) throw new Error("Invalid image data.");
   const [, mediaType, base64Data] = match;
+  const spoken = (transcript || "").trim();
+
+  const noteSection = spoken
+    ? "The contractor also dictated this voice note about the material. It may contain speech-recognition mistakes, and it often " +
+      "names the product, brand or size and says how many are needed:\n" +
+      `"""${spoken}"""\n` +
+      "Combine the photo and the voice note: the photo shows what it is, the note gives details the photo can't. " +
+      "Where the note states a name, size or brand, use it (then verify it online). If the photo and the note disagree, say so in \"details\".\n"
+    : "No voice note was recorded, so identify it from the photo alone.\n";
 
   const prompt =
     "You are helping a general contractor build a materials shopping list from a job-site photo.\n" +
@@ -307,13 +320,16 @@ async function identifyMaterial(dataUrl) {
     "Then use web search to find its exact product name and real dimensions/specs (nominal and actual size, length, thickness, " +
     "gauge, rating, pack or box quantity — whatever applies). Search once or twice and prefer manufacturer or major supplier pages. " +
     "If it is a generic commodity (e.g. 2x4 lumber, 1/2\" drywall), give the standard name and standard dimensions.\n" +
+    noteSection +
     "If you cannot tell what it is, say so — do not invent specs.\n" +
     "Do all searching first. Your final message must be ONLY a JSON object (no markdown, no other text) with these keys:\n" +
-    '"item": specific product name, max 12 words (include brand/model only if visible or confirmed),\n' +
+    '"item": specific product name in English, max 12 words (include brand/model only if visible, stated or confirmed),\n' +
     '"dimensions": size/specs on one line in US units (inches/feet), metric in parentheses only when it is standard; "" if unknown,\n' +
+    '"quantity": how many to buy, ONLY if the voice note clearly says (e.g. "12", "2 boxes", "3 sheets"), otherwise "",\n' +
+    '"note": the voice note cleaned up — fix obvious recognition errors, punctuation and capitalization, but do not add, remove or ' +
+    'invent information, and keep the same language as the note; "" if there is no voice note,\n' +
     '"confidence": "high", "medium" or "low",\n' +
-    '"details": one short sentence saying what you identified and what you could not confirm.\n' +
-    "Write in English.";
+    '"details": one short sentence in English saying what you identified and what you could not confirm.';
 
   const userMsg = {
     role: "user",
@@ -334,25 +350,27 @@ async function identifyMaterial(dataUrl) {
   let result;
   let searched = true;
   try {
-    result = await runWithSearch([userMsg], 1500, [search]);
+    result = await runWithSearch([userMsg], 1800, [search]);
   } catch (err) {
     // 400/403: web search not enabled for this organization. Anything else
     // (bad key, network, rate limit) is a real failure the caller reports.
     if (err.status !== 400 && err.status !== 403) throw err;
     searched = false;
-    result = { data: await callClaudeFull([userMsg], 1000), urls: [] };
+    result = { data: await callClaudeFull([userMsg], 1500), urls: [] };
   }
 
   const text = (result.data.content || []).map((b) => (b.type === "text" ? b.text || "" : "")).join("");
   const parsed = parseJsonReply(text);
   if (!parsed) throw new Error("AI reply wasn't readable.");
-  const str = (v) => (typeof v === "string" ? v.trim() : "");
+  const str = (v) => (typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "");
   const confidence = ["high", "medium", "low"].includes(str(parsed.confidence).toLowerCase())
     ? str(parsed.confidence).toLowerCase()
     : "low";
   return {
     item: str(parsed.item),
     dimensions: str(parsed.dimensions),
+    quantity: str(parsed.quantity),
+    note: spoken ? str(parsed.note) : "",
     confidence,
     details: str(parsed.details),
     searched,
@@ -360,24 +378,3 @@ async function identifyMaterial(dataUrl) {
   };
 }
 
-// Material voice note → { note, quantity }: the transcript cleaned up
-// (speech-recognition errors, punctuation — nothing added or removed) and
-// the quantity to buy if the note clearly states one. Text only, one small
-// call; skipped entirely when there's no transcript.
-async function cleanMaterialNote(transcript, itemName) {
-  const spoken = (transcript || "").trim();
-  if (!spoken) return { note: "", quantity: "" };
-  const prompt =
-    `A contractor dictated a voice note about a material${itemName ? ` ("${itemName}")` : ""} for a shopping list. ` +
-    "The transcript may contain speech-recognition mistakes.\n" +
-    `Transcript: """${spoken}"""\n\n` +
-    "Reply with ONLY a JSON object (no markdown, no other text) with these keys:\n" +
-    '"note": the transcript cleaned up — fix obvious recognition errors, punctuation and capitalization, but do not add, remove or invent information,\n' +
-    '"quantity": the quantity to buy if the note clearly states one (e.g. "12", "2 boxes", "3 sheets"), otherwise "".\n' +
-    "Keep the same language as the transcript.";
-  const text = await callClaude(prompt, 500);
-  const parsed = parseJsonReply(text);
-  if (!parsed) throw new Error("AI reply wasn't readable.");
-  const str = (v) => (typeof v === "string" ? v.trim() : typeof v === "number" ? String(v) : "");
-  return { note: str(parsed.note), quantity: str(parsed.quantity) };
-}
