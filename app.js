@@ -785,6 +785,7 @@ async function renderDashboard(id) {
                 : `<span class="desc" style="opacity:.6;">No transcript (speech-to-text wasn't available when this was recorded).</span>`
             }
             ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
+            ${v.transcript && aiConfigured() ? `<button class="btn ghost" data-retr-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">🌐 ${v.translation ? "Translate again" : "Translate"}</button>` : ""}
           </div>`
                 )
                 .join("")
@@ -837,6 +838,33 @@ async function renderDashboard(id) {
     el.addEventListener("click", () => {
       const issue = issues.find((i) => i.id === el.dataset.issueId);
       if (issue) openIssueDetail(issue, captures);
+    });
+  });
+  $app.querySelectorAll("[data-retr-voice]").forEach((el) => {
+    const v = captures.find((c) => c.id === el.dataset.retrVoice);
+    if (!v) return;
+    el.addEventListener("click", async () => {
+      const label = el.textContent;
+      el.disabled = true;
+      el.textContent = "🌐 Translating…";
+      const tr = await tryTranslate(v.transcript, true, v.translation || "");
+      if (!tr) {
+        toast("Couldn't translate — try again");
+        el.disabled = false;
+        el.textContent = label;
+        return;
+      }
+      const patch = { translation: tr.translation, translationLang: tr.target };
+      await MossDB.captures.update(v.id, patch);
+      // A voice note that belongs to an issue or material: keep that record's copy in step.
+      if (v.issueId) {
+        const issue = (await MossDB.issues.all()).find((i) => i.id === v.issueId);
+        if (issue) await MossDB.issues.add({ ...issue, ...patch });
+      }
+      if (v.materialId) await MossDB.captures.update(v.materialId, patch);
+      toast("Translation updated");
+      syncCapturesWithOneDrive();
+      render();
     });
   });
   $app.querySelectorAll("[data-photo-id]").forEach((el) => {
@@ -1570,7 +1598,7 @@ function openIssueSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
-        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang)}
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("i-retr", !!state.translation, state.note)}
         <div class="field">
           <label>Trade</label>
           <select id="f-trade">${TRADES.map((t) => `<option ${t === state.trade ? "selected" : ""}>${t}</option>`).join("")}</select>
@@ -1615,6 +1643,7 @@ function openIssueSheet(projectId) {
     // Keep state in sync as the user types, so redraws never lose edits.
     $("f-title")?.addEventListener("input", (e) => { state.title = e.target.value; state.titleTouched = true; });
     $("f-title-lang")?.addEventListener("change", (e) => changeTitleLang(e.target.value));
+    $("i-retr")?.addEventListener("click", () => runTranslate(true));
     $("f-trade")?.addEventListener("change", (e) => { state.trade = e.target.value; state.tradeTouched = true; });
     $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
   };
@@ -1718,10 +1747,12 @@ function openIssueSheet(projectId) {
   };
 
   // Spanish <-> English translation of the final note (only when switched on).
-  const runTranslate = async () => {
+  // `force` = "Translate again" was pressed: ignores the Settings switch and
+  // keeps the old translation if the new try fails.
+  const runTranslate = async (force = false) => {
     const run = ++translateRun;
     const text = state.note.trim();
-    if (!aiTranslateEnabled() || !text) {
+    if (!(force ? aiConfigured() : aiTranslateEnabled()) || !text) {
       state.translating = false;
       state.translation = "";
       state.translatedFrom = "";
@@ -1730,10 +1761,17 @@ function openIssueSheet(projectId) {
     }
     state.translating = true;
     draw();
-    const tr = await tryTranslate(text);
+    const tr = await tryTranslate(text, force, force ? state.translation : "");
     if (closed || run !== translateRun) return;
-    state.translation = tr ? tr.translation : "";
-    state.translationLang = tr ? tr.target : "";
+    if (tr) {
+      state.translation = tr.translation;
+      state.translationLang = tr.target;
+    } else if (force) {
+      toast("Couldn't translate — try again");
+    } else {
+      state.translation = "";
+      state.translationLang = "";
+    }
     state.translatedFrom = text;
     state.translating = false;
     draw();
@@ -1789,8 +1827,8 @@ function openIssueSheet(projectId) {
         state.translation = tr ? tr.translation : "";
         state.translationLang = tr ? tr.target : "";
         state.translatedFrom = state.note.trim();
-      } else if (!state.note.trim()) {
-        state.translation = "";
+      } else if (!state.note.trim() || state.note.trim() !== state.translatedFrom) {
+        state.translation = ""; // empty note, or switch off and note edited since: don't save a mismatched translation
       }
       const now = Date.now();
       const extOfPhoto = { "image/png": "png", "image/heic": "heic", "image/heif": "heif", "image/webp": "webp" }[state.photo.file.type] || "jpg";
@@ -1878,16 +1916,32 @@ function openIssueSheet(projectId) {
 function openIssueDetail(issue, captures) {
   const photo = captures.find((c) => c.id === issue.photoId);
   const voice = captures.find((c) => c.id === issue.voiceId);
+  const noteText = issuePdfData(issue, captures).note.trim();
   openSheet(`
     <h2>${escapeHtml(issue.title)}</h2>
     <span class="desc">${escapeHtml(issue.trade)}</span>
     ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Issue photo">` : ""}
     ${issue.requirement ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(issue.requirement)}</div>` : ""}
     ${translationCardHtml(issue.translation, issue.translationLang)}
+    ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${closeButton()}
   `);
   wireCloseButton();
+  wireRetranslate(
+    "d-retr",
+    noteText,
+    issue.translation || "",
+    async (patch) => {
+      Object.assign(issue, patch); // the dashboard's own copy too, so it shows the new one next time
+      await MossDB.issues.add({ ...issue });
+      if (voice) {
+        Object.assign(voice, patch);
+        await MossDB.captures.update(voice.id, patch);
+      }
+    },
+    () => openIssueDetail(issue, captures)
+  );
 }
 
 // ---------- Issues PDF export ----------
@@ -2065,14 +2119,55 @@ function translationCardHtml(text, lang) {
 
 // Never throws: returns { translation, target } or null (switch off, no key,
 // nothing to translate, or the AI failed / took too long).
-async function tryTranslate(text) {
-  if (!aiTranslateEnabled() || !String(text || "").trim()) return null;
+// `force` = the person pressed "Translate again": works even if the Settings
+// switch is off (it only needs the API key).
+async function tryTranslate(text, force = false, previous = "") {
+  if (!(force ? aiConfigured() : aiTranslateEnabled()) || !String(text || "").trim()) return null;
   try {
-    return await withTimeout(translateVoiceNote(text), 20000, "it took too long");
+    return await withTimeout(translateVoiceNote(text, previous), 20000, "it took too long");
   } catch (err) {
     console.error("Translation failed", err);
     return null;
   }
+}
+
+// "Translate again" button for a screen that shows a note. Shown whenever
+// there is a note and an API key (also when no translation exists yet, e.g.
+// the switch was off or the first try failed).
+function retranslateButtonHtml(id, hasTranslation, noteText) {
+  if (!aiConfigured() || !String(noteText || "").trim()) return "";
+  return `<button class="btn ghost" id="${id}" style="width:100%;">🌐 ${hasTranslation ? "Translate again" : "Translate note"}</button>`;
+}
+
+// Wires that button on a SAVED issue/material/voice note. `apply(patch)` must
+// store { translation, translationLang } wherever it belongs; `done()` redraws.
+function wireRetranslate(id, noteText, previous, apply, done) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "🌐 Translating…";
+    const tr = await tryTranslate(noteText, true, previous);
+    if (!tr) {
+      toast("Couldn't translate — try again");
+      btn.disabled = false;
+      btn.textContent = label;
+      return;
+    }
+    try {
+      await apply({ translation: tr.translation, translationLang: tr.target });
+    } catch (err) {
+      console.error("Saving translation failed", err);
+      toast("Couldn't save the translation — try again");
+      btn.disabled = false;
+      btn.textContent = label;
+      return;
+    }
+    toast("Translation updated");
+    done();
+    syncCapturesWithOneDrive();
+  });
 }
 
 // ---------- Materials: photo + AI online lookup + voice note ----------
@@ -2184,7 +2279,7 @@ function openMaterialSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
-        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang)}
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("m-retr", !!state.translation, state.note)}
       `
         : "";
 
@@ -2215,6 +2310,7 @@ function openMaterialSheet(projectId) {
     $("m-rec")?.addEventListener("click", startRecording);
     $("m-stop")?.addEventListener("click", stopRecording);
     $("m-ai")?.addEventListener("click", runIdentify);
+    $("m-retr")?.addEventListener("click", () => runTranslate(true));
     $("m-save")?.addEventListener("click", save);
     // Keep state in sync as the user types, so redraws never lose edits. The
     // Save button is updated in place (no redraw while typing).
@@ -2293,10 +2389,12 @@ function openMaterialSheet(projectId) {
   };
 
   // Spanish <-> English translation of the final note (only when switched on).
-  const runTranslate = async () => {
+  // `force` = "Translate again" was pressed: ignores the Settings switch and
+  // keeps the old translation if the new try fails.
+  const runTranslate = async (force = false) => {
     const run = ++translateRun;
     const text = state.voice ? state.note.trim() : "";
-    if (!aiTranslateEnabled() || !text) {
+    if (!(force ? aiConfigured() : aiTranslateEnabled()) || !text) {
       state.translating = false;
       state.translation = "";
       state.translatedFrom = "";
@@ -2305,10 +2403,17 @@ function openMaterialSheet(projectId) {
     }
     state.translating = true;
     draw();
-    const tr = await tryTranslate(text);
+    const tr = await tryTranslate(text, force, force ? state.translation : "");
     if (closed || run !== translateRun) return;
-    state.translation = tr ? tr.translation : "";
-    state.translationLang = tr ? tr.target : "";
+    if (tr) {
+      state.translation = tr.translation;
+      state.translationLang = tr.target;
+    } else if (force) {
+      toast("Couldn't translate — try again");
+    } else {
+      state.translation = "";
+      state.translationLang = "";
+    }
     state.translatedFrom = text;
     state.translating = false;
     draw();
@@ -2379,7 +2484,7 @@ function openMaterialSheet(projectId) {
         state.translation = tr ? tr.translation : "";
         state.translationLang = tr ? tr.target : "";
         state.translatedFrom = state.note.trim();
-      } else if (!state.note.trim() || !state.voice) {
+      } else if (!state.note.trim() || !state.voice || state.note.trim() !== state.translatedFrom) {
         state.translation = "";
       }
       const now = Date.now();
@@ -2488,11 +2593,26 @@ function openMaterialDetail(material, captures) {
         : ""
     }
     ${translationCardHtml(material.translation, material.translationLang)}
+    ${retranslateButtonHtml("d-retr", !!material.translation, material.note)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${material.sources && material.sources.length ? `<span class="desc">Checked online: ${material.sources.map(escapeHtml).join(", ")}</span>` : ""}
     ${closeButton()}
   `);
   wireCloseButton();
+  wireRetranslate(
+    "d-retr",
+    material.note || "",
+    material.translation || "",
+    async (patch) => {
+      Object.assign(material, patch);
+      await MossDB.captures.update(material.id, patch);
+      if (voice) {
+        Object.assign(voice, patch);
+        await MossDB.captures.update(voice.id, patch);
+      }
+    },
+    () => openMaterialDetail(material, captures)
+  );
 }
 
 // Shopping-list PDF: pick which materials to include (the ones marked "To

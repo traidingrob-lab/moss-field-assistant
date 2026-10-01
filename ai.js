@@ -453,7 +453,7 @@ async function identifyMaterial(dataUrl, transcript = "") {
 // { lang, target, translation } where `target` is the language of the
 // translation ("en" or "es"), or null if there is nothing to translate
 // (empty text, or the model returned the same text). Throws on API failure.
-async function translateVoiceNote(text) {
+async function translateVoiceNote(text, previous = "") {
   const t = String(text || "").trim();
   if (!t) return null;
   const prompt =
@@ -463,6 +463,10 @@ async function translateVoiceNote(text) {
     "If it is in some other language, translate it to English.\n" +
     "Keep it natural and faithful: use correct construction/trade terms, keep numbers, measurements, names and brands exactly, " +
     "and do not add, remove or explain anything.\n" +
+    (previous
+      ? `A previous translation was rejected by the user, so redo it carefully: ${JSON.stringify(String(previous))}. ` +
+        "Fix any mistakes, unnatural wording or wrong trade terms; do not just repeat it unless it is already perfect.\n"
+      : "") +
     `Voice note:\n"""${t}"""\n` +
     'Reply with ONLY a JSON object: {"language": "es" or "en" or "other" (the language of the original), "translation": "<the translation>"}';
   const reply = await callClaude(prompt, 1000);
