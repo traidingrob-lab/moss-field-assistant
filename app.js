@@ -1521,6 +1521,8 @@ function openIssueSheet(projectId) {
     translationLang: "",
     translatedFrom: "", // the note text the translation belongs to
     translating: false,
+    titleLang: issueTitleLang(), // "en" | "es": language the title is written in
+    titleBusy: false, // AI rewriting the title in the other language
     title: "",
     trade: "General",
     note: "",
@@ -1532,11 +1534,12 @@ function openIssueSheet(projectId) {
   let closed = false;
   let analysisRun = 0; // bumped on every analysis so a stale result can't overwrite a newer one
   let translateRun = 0;
+  let titleRun = 0;
 
   const draw = () => {
     if (closed) return;
     const haveBoth = !!(state.photo && state.voice);
-    const canSave = haveBoth && !state.recording && !state.analyzing && !state.translating && !state.saving;
+    const canSave = haveBoth && !state.recording && !state.analyzing && !state.translating && !state.titleBusy && !state.saving;
 
     const photoBlock = `
       ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Issue photo">` : ""}
@@ -1573,9 +1576,17 @@ function openIssueSheet(projectId) {
           <select id="f-trade">${TRADES.map((t) => `<option ${t === state.trade ? "selected" : ""}>${t}</option>`).join("")}</select>
         </div>
         <div class="field">
-          <label>Title</label>
-          <input id="f-title" value="${escapeHtml(state.title)}" placeholder='e.g. "Hall bathroom floor register"'>
+          <label>Title · language</label>
+          <select id="f-title-lang" ${state.analyzing || state.titleBusy || state.saving ? "disabled" : ""}>
+            <option value="en" ${state.titleLang === "en" ? "selected" : ""}>English</option>
+            <option value="es" ${state.titleLang === "es" ? "selected" : ""}>Español</option>
+          </select>
         </div>
+        <div class="field">
+          <label>Title</label>
+          <input id="f-title" value="${escapeHtml(state.title)}" placeholder='${state.titleLang === "es" ? "p. ej. &quot;Registro del piso del baño&quot;" : "e.g. &quot;Hall bathroom floor register&quot;"}'>
+        </div>
+        ${state.titleBusy ? `<p class="empty" style="text-align:left;">🌐 ${state.titleLang === "es" ? "Traduciendo el título…" : "Translating the title…"}</p>` : ""}
         ${state.analyzing ? `<p class="empty" style="text-align:left;">🤖 AI is identifying the trade and writing the note…</p>` : ""}
         ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
       `;
@@ -1588,7 +1599,7 @@ function openIssueSheet(projectId) {
       ${detailsBlock}
       <div class="sheet-actions">
         <button class="btn ghost" id="i-cancel">Cancel</button>
-        <button class="btn primary" id="i-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : state.analyzing ? "Analyzing…" : state.translating ? "Translating…" : "Save Issue"}</button>
+        <button class="btn primary" id="i-save" ${canSave ? "" : "disabled"} style="${canSave ? "" : "opacity:.5;"}">${state.saving ? "Saving…" : state.analyzing ? "Analyzing…" : state.translating || state.titleBusy ? "Translating…" : "Save Issue"}</button>
       </div>
     `;
     wire();
@@ -1603,6 +1614,7 @@ function openIssueSheet(projectId) {
     $("i-save")?.addEventListener("click", save);
     // Keep state in sync as the user types, so redraws never lose edits.
     $("f-title")?.addEventListener("input", (e) => { state.title = e.target.value; state.titleTouched = true; });
+    $("f-title-lang")?.addEventListener("change", (e) => changeTitleLang(e.target.value));
     $("f-trade")?.addEventListener("change", (e) => { state.trade = e.target.value; state.tradeTouched = true; });
     $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
   };
@@ -1678,6 +1690,33 @@ function openIssueSheet(projectId) {
     runAnalysis();
   };
 
+  // Picking the other title language: remember it, and have the AI rewrite
+  // the title already on screen (if any) in that language.
+  const changeTitleLang = async (lang) => {
+    lang = lang === "es" ? "es" : "en";
+    if (lang === state.titleLang) return;
+    state.titleLang = lang;
+    setIssueTitleLang(lang);
+    const current = state.title.trim();
+    if (!current || !aiConfigured()) {
+      draw();
+      return;
+    }
+    const run = ++titleRun;
+    state.titleBusy = true;
+    draw();
+    try {
+      const t = await withTimeout(translateIssueTitle(current, lang), 20000, "it took too long");
+      if (closed || run !== titleRun) return;
+      if (state.title.trim() === current) state.title = t; // don't clobber text typed meanwhile
+    } catch {
+      if (closed || run !== titleRun) return;
+      toast("Couldn't translate the title — edit it by hand");
+    }
+    state.titleBusy = false;
+    draw();
+  };
+
   // Spanish <-> English translation of the final note (only when switched on).
   const runTranslate = async () => {
     const run = ++translateRun;
@@ -1720,7 +1759,7 @@ function openIssueSheet(projectId) {
       });
       let r;
       try {
-        r = await Promise.race([analyzeIssueCapture(state.photo.dataUrl, state.voice.transcript, TRADES), timeout]);
+        r = await Promise.race([analyzeIssueCapture(state.photo.dataUrl, state.voice.transcript, TRADES, state.titleLang), timeout]);
       } finally {
         clearTimeout(timer);
       }
@@ -1739,7 +1778,7 @@ function openIssueSheet(projectId) {
   };
 
   const save = async () => {
-    if (!state.photo || !state.voice || state.recording || state.analyzing || state.translating || state.saving) return;
+    if (!state.photo || !state.voice || state.recording || state.analyzing || state.translating || state.titleBusy || state.saving) return;
     state.saving = true;
     draw();
     try {
@@ -1765,7 +1804,7 @@ function openIssueSheet(projectId) {
       const voiceId = MossDB.uid();
       const stamp = issueStamp(state.voice.startedAt);
       const note = state.note.trim();
-      const title = state.title.trim() || (note ? note.slice(0, 60) : `Issue — ${stamp}`);
+      const title = state.title.trim() || (note ? note.slice(0, 60) : `${state.titleLang === "es" ? "Problema" : "Issue"} — ${stamp}`);
       const trade = TRADES.includes(state.trade) ? state.trade : "General";
 
       await MossDB.captures.add({
@@ -1826,6 +1865,7 @@ function openIssueSheet(projectId) {
     closed = true;
     analysisRun++;
     translateRun++;
+    titleRun++;
     if (state.recorder) {
       state.recorder.cancel();
       state.recorder = null;

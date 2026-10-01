@@ -211,7 +211,44 @@ function downscaleImageForAI(dataUrl, maxEdge = 1568) {
 //   note        — the transcript cleaned up (speech-recognition errors,
 //                 punctuation), never embellished
 // One API call per new issue; only runs when an API key is saved.
-async function analyzeIssueCapture(dataUrl, transcript, trades) {
+// Which language new issue titles are written in: "en" or "es". Remembered
+// between issues; the New Issue screen has the picker.
+const ISSUE_TITLE_LANG_STORAGE = "moss_issue_title_lang";
+
+function issueTitleLang() {
+  try {
+    return localStorage.getItem(ISSUE_TITLE_LANG_STORAGE) === "es" ? "es" : "en";
+  } catch {
+    return "en";
+  }
+}
+
+function setIssueTitleLang(lang) {
+  try {
+    localStorage.setItem(ISSUE_TITLE_LANG_STORAGE, lang === "es" ? "es" : "en");
+  } catch {
+    // localStorage unavailable — the choice just won't be remembered; harmless.
+  }
+}
+
+// Rewrites a short issue title in English or Spanish (keeps the meaning,
+// names and numbers). Returns the new title; throws on API failure.
+async function translateIssueTitle(title, lang) {
+  const t = String(title || "").trim();
+  if (!t) return "";
+  const target = lang === "es" ? "Spanish" : "English";
+  const reply = await callClaude(
+    `Write this short construction job-site issue title in ${target}. If it is already in ${target}, return it unchanged. ` +
+      "Use natural trade terms, keep names, numbers and measurements exactly, max 8 words, no quotes, no explanation. " +
+      `Reply with ONLY the title.\nTitle: ${t}`,
+    120
+  );
+  const out = reply.split("\n")[0].replace(/^["'“”]+|["'“”]+$/g, "").trim();
+  if (!out) throw new Error("AI reply wasn't readable.");
+  return out;
+}
+
+async function analyzeIssueCapture(dataUrl, transcript, trades, titleLang = "en") {
   const small = await downscaleImageForAI(dataUrl);
   const match = /^data:([^;]+);base64,(.*)$/.exec(small || "");
   if (!match) throw new Error("Invalid image data.");
@@ -225,11 +262,12 @@ async function analyzeIssueCapture(dataUrl, transcript, trades) {
     `Voice note transcript (may be empty or contain speech-recognition mistakes): """${spoken}"""\n\n` +
     "Reply with ONLY a JSON object (no markdown, no other text) with these keys:\n" +
     '"trade": exactly one item from the list above,\n' +
-    '"title": a specific issue title, max 8 words,\n' +
+    `"title": a specific issue title, max 8 words, written in ${titleLang === "es" ? "Spanish" : "English"},\n` +
     '"description": one short, specific sentence describing what the photo shows,\n' +
     '"note": the transcript cleaned up — fix obvious speech-recognition errors, punctuation and ' +
     "capitalization, but do not add, remove or invent any information (empty string if the transcript is empty).\n" +
-    "Write title, description and note in the same language as the transcript; if there is no transcript, use English.";
+    `Write the title in ${titleLang === "es" ? "Spanish" : "English"} (always, whatever language the note is in). ` +
+    "Write description and note in the same language as the transcript; if there is no transcript, use English.";
 
   const text = await callClaude(
     [
