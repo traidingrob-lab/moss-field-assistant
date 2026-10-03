@@ -988,9 +988,10 @@ async function renderAllIssues() {
           ? issues
               .map(
                 (i) => `
-        <div class="row" style="cursor:default;">
+        <div class="row" data-all-issue-id="${escapeHtml(i.id)}" style="cursor:pointer;">
           <span class="icon" style="color:var(--red);">●</span>
           <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(nameOf(i.projectId))} · ${escapeHtml(i.trade)}</span></span>
+          <span class="chev">›</span>
         </div>`
               )
               .join("")
@@ -1000,6 +1001,15 @@ async function renderAllIssues() {
   `;
   shell({ header, body, activeTab: "home" });
   document.getElementById("issues-pdf").addEventListener("click", () => openIssuesPdfSheet(null));
+  // Tap an issue to open it: photos, note, and "Fixed — move to drawer".
+  $app.querySelectorAll("[data-all-issue-id]").forEach((el) => {
+    el.addEventListener("click", async () => {
+      const issue = issues.find((i) => i.id === el.dataset.allIssueId);
+      if (!issue) return;
+      const captures = await MossDB.captures.forProject(issue.projectId);
+      openIssueDetail(issue, captures);
+    });
+  });
 }
 
 // ---------- Ask AI ----------
