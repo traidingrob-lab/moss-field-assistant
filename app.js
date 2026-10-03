@@ -78,6 +78,23 @@ window.addEventListener("hashchange", () => {
   render();
 });
 
+// The written voice note boxes (New Issue, Material, Inspection) start tall
+// and grow as the text grows, so the whole note is visible without scrolling.
+function growNote(el) {
+  if (!el || !el.scrollHeight) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight + 4, Math.round(window.innerHeight * 0.6)) + "px";
+}
+window.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("input", (e) => {
+    if (e.target && e.target.matches && e.target.matches("#f-note, #in-note")) growNote(e.target);
+  });
+  const sheetEl = document.getElementById("sheet");
+  if (sheetEl && window.MutationObserver) {
+    new MutationObserver(() => document.querySelectorAll("#f-note, #in-note").forEach(growNote)).observe(sheetEl, { childList: true, subtree: true });
+  }
+});
+
 window.addEventListener("DOMContentLoaded", async () => {
   try {
     // Fire-and-forget: resolves the redirect-back leg of Microsoft sign-in
@@ -1130,7 +1147,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "37"; // matches the sw.js cache number
+const APP_VERSION = "38"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -3425,7 +3442,7 @@ async function openInspectionSheet(preProjectId) {
       noteBlock = `
         <div class="field">
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
-          <textarea id="in-note" rows="5" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what was said (optional)"}">${escapeHtml(state.note)}</textarea>
+          <textarea id="in-note" rows="9" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what was said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
         ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("in-retr", !!state.translation, state.note)}
         ${state.analyzing ? `<p class="empty" style="text-align:left;">🤖 AI is writing up the note and naming the inspection…</p>` : ""}
