@@ -29,52 +29,124 @@ function pdfSafe(str) {
 // Resolves to { dataUrl, width, height }, or null if the image can't be
 // decoded (caller just leaves the photo out).
 function prepareImageForPdf(dataUrl, maxEdge = 1100, quality = 0.8) {
-  return new Promise((resolve) => {
-    if (!dataUrl) return resolve(null);
-    let settled = false;
-    const done = (v) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(giveUp);
-      resolve(v);
-    };
-    const giveUp = setTimeout(() => done(null), 15000);
-    const draw = (src, w, h) => {
-      try {
-        const scale = Math.min(1, maxEdge / Math.max(w, h));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(w * scale));
-        canvas.height = Math.max(1, Math.round(h * scale));
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#fff"; // JPEG has no transparency
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
-        const out = { dataUrl: canvas.toDataURL("image/jpeg", quality), width: canvas.width, height: canvas.height };
-        // Phones keep every canvas in memory until it is shrunk: with 5+ big
-        // photos in one PDF that made later photos silently fail.
-        canvas.width = 1;
-        canvas.height = 1;
-        done(out);
-      } catch {
-        done(null);
+  // Phones often hand back a blank (all-white) picture when a big photo is
+  // drawn straight onto a canvas, with no error at all. So: shrink it in a
+  // memory-friendly way, LOOK at the result, and if it is blank try again
+  // with another method / a smaller size. Resolves to
+  // { dataUrl, width, height } or null (caller shows a "couldn't be
+  // included" note instead of a blank box).
+  const withTimeout = (promise, ms) =>
+    Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(null), ms))]);
+
+  const loadImg = () =>
+    new Promise((resolve) => {
+      const img = new Image();
+      img.onload = async () => {
+        try { if (img.decode) await img.decode(); } catch {}
+        resolve(img);
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+
+  const isBlank = (canvas) => {
+    try {
+      const probe = document.createElement("canvas");
+      probe.width = 16;
+      probe.height = 16;
+      const pctx = probe.getContext("2d");
+      pctx.drawImage(canvas, 0, 0, 16, 16);
+      const d = pctx.getImageData(0, 0, 16, 16).data;
+      let min = 255;
+      let max = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const v = (d[i] + d[i + 1] + d[i + 2]) / 3;
+        if (v < min) min = v;
+        if (v > max) max = v;
       }
-    };
-    const img = new Image();
-    img.onload = () => draw(img, img.width, img.height);
-    img.onerror = async () => {
-      // Second chance: let the browser decode it another way (some phone
-      // formats fail as an <img> but open fine as a bitmap).
-      try {
-        const blob = await (await fetch(dataUrl)).blob();
-        const bmp = await createImageBitmap(blob);
-        draw(bmp, bmp.width, bmp.height);
-        if (bmp.close) bmp.close();
-      } catch {
-        done(null);
+      probe.width = probe.height = 1;
+      return min > 247 || (max < 8 && min < 8); // all white, or all black
+    } catch {
+      return false; // can't check: trust it
+    }
+  };
+
+  const toResult = (src, srcW, srcH, edge) => {
+    const scale = Math.min(1, edge / Math.max(srcW, srcH));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(srcW * scale));
+    canvas.height = Math.max(1, Math.round(srcH * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; // JPEG has no transparency
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+    if (isBlank(canvas)) {
+      canvas.width = canvas.height = 1;
+      return null;
+    }
+    const out = { dataUrl: canvas.toDataURL("image/jpeg", quality), width: canvas.width, height: canvas.height };
+    canvas.width = canvas.height = 1; // let the phone free the memory
+    return out;
+  };
+
+  const attempt = async () => {
+    if (!dataUrl) return null;
+    const img = await loadImg();
+    let w = img ? img.naturalWidth || img.width : 0;
+    let h = img ? img.naturalHeight || img.height : 0;
+    const edges = [maxEdge, Math.min(maxEdge, 800), Math.min(maxEdge, 500)];
+    let blob = null;
+    const getBlob = async () => {
+      if (!blob) {
+        // (No fetch(): the app's security policy blocks data: URLs there.)
+        const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl);
+        if (!m) throw new Error("bad data URL");
+        const bin = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        blob = new Blob([bytes], { type: m[1] || "image/jpeg" });
       }
+      return blob;
     };
-    img.src = dataUrl;
-  });
+    const release = () => { if (img) img.src = ""; };
+    for (const edge of edges) {
+      // Method 1: decode straight from the file at the small size (needs far
+      // less memory than drawing the full-size photo).
+      if (typeof createImageBitmap === "function") {
+        try {
+          const bl = await getBlob();
+          let opts;
+          if (w && h) {
+            const sc = Math.min(1, edge / Math.max(w, h));
+            opts = { resizeWidth: Math.max(1, Math.round(w * sc)), resizeHeight: Math.max(1, Math.round(h * sc)), resizeQuality: "medium" };
+          }
+          const bmp = await createImageBitmap(bl, opts);
+          const r = toResult(bmp, bmp.width, bmp.height, edge);
+          if (bmp.close) bmp.close();
+          if (r) { release(); return r; }
+        } catch {}
+      }
+      // Method 2: draw the <img> element.
+      if (img && w && h) {
+        try {
+          const r = toResult(img, w, h, edge);
+          if (r) { release(); return r; }
+        } catch {}
+      }
+    }
+    release();
+    return null;
+  };
+
+  // One at a time with a short breather, so Safari can free the previous
+  // photo's memory before the next one is decoded.
+  return withTimeout(
+    attempt().then(async (r) => {
+      await new Promise((res) => setTimeout(res, 60));
+      return r;
+    }),
+    40000
+  );
 }
 
 async function buildIssuesPdf(sections, opts = {}) {
