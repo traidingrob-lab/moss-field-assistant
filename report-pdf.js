@@ -31,27 +31,47 @@ function pdfSafe(str) {
 function prepareImageForPdf(dataUrl, maxEdge = 1100, quality = 0.8) {
   return new Promise((resolve) => {
     if (!dataUrl) return resolve(null);
-    const giveUp = setTimeout(() => resolve(null), 8000);
-    const img = new Image();
-    img.onload = () => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(giveUp);
+      resolve(v);
+    };
+    const giveUp = setTimeout(() => done(null), 15000);
+    const draw = (src, w, h) => {
       try {
-        const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+        const scale = Math.min(1, maxEdge / Math.max(w, h));
         const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(img.width * scale));
-        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.width = Math.max(1, Math.round(w * scale));
+        canvas.height = Math.max(1, Math.round(h * scale));
         const ctx = canvas.getContext("2d");
         ctx.fillStyle = "#fff"; // JPEG has no transparency
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve({ dataUrl: canvas.toDataURL("image/jpeg", quality), width: canvas.width, height: canvas.height });
+        ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+        const out = { dataUrl: canvas.toDataURL("image/jpeg", quality), width: canvas.width, height: canvas.height };
+        // Phones keep every canvas in memory until it is shrunk: with 5+ big
+        // photos in one PDF that made later photos silently fail.
+        canvas.width = 1;
+        canvas.height = 1;
+        done(out);
       } catch {
-        resolve(null);
+        done(null);
       }
     };
-    img.onerror = () => {
-      clearTimeout(giveUp);
-      resolve(null);
+    const img = new Image();
+    img.onload = () => draw(img, img.width, img.height);
+    img.onerror = async () => {
+      // Second chance: let the browser decode it another way (some phone
+      // formats fail as an <img> but open fine as a bitmap).
+      try {
+        const blob = await (await fetch(dataUrl)).blob();
+        const bmp = await createImageBitmap(blob);
+        draw(bmp, bmp.width, bmp.height);
+        if (bmp.close) bmp.close();
+      } catch {
+        done(null);
+      }
     };
     img.src = dataUrl;
   });
@@ -179,13 +199,28 @@ async function buildIssuesPdf(sections, opts = {}) {
         doc.setLineWidth(0.5);
         doc.rect(M, y, pw, ph);
         y += ph + 10;
+      } else if (issue.photoDataUrl) {
+        font("italic", 9);
+        color(SOFT);
+        ensure(14);
+        doc.text("(Photo couldn't be included in this PDF)", M, y + 9);
+        y += 16;
       }
 
       // Extra photos (picked from the gallery): a row of small pictures.
       const extraList = [];
+      let missingExtras = 0;
       for (const d of issue.extraPhotoDataUrls || []) {
-        const pr = await prepareImage(d);
+        const pr = await prepareImage(d, 700, 0.75);
         if (pr) extraList.push(pr);
+        else missingExtras++;
+      }
+      if (missingExtras) {
+        font("italic", 9);
+        color(SOFT);
+        ensure(14);
+        doc.text(`(${missingExtras} photo${missingExtras === 1 ? "" : "s"} couldn't be included in this PDF)`, M, y + 9);
+        y += 16;
       }
       if (extraList.length) {
         const gap = 6;
