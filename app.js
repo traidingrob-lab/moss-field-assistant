@@ -86,7 +86,11 @@ window.addEventListener("DOMContentLoaded", async () => {
     // needs the result, so this doesn't need to block boot.
     initMsal();
     await MossDB.seedIfEmpty();
+    // Ask the browser not to throw our data away when the phone is low on space.
+    try { navigator.storage?.persist?.(); } catch {}
+    const recovered = await recoverOrphanIssues();
     await render();
+    if (recovered) toast(`Recovered ${recovered} issue${recovered === 1 ? "" : "s"} from saved voice notes`);
   } catch (err) {
     // IndexedDB can be unavailable (Safari private browsing, storage
     // disabled by device policy, quota errors) — without this, the app
@@ -632,7 +636,11 @@ async function renderDashboard(id) {
   }
   const issues = await MossDB.issues.forProject(id);
   const captures = await MossDB.captures.forProject(id);
-  const openIssues = issues.filter((i) => i.status === "Open");
+  // Newest first, so the compact view's single visible row is the latest one.
+  const issueTime = (i) => String(i.recordedAt || i.createdAt || "");
+  const openIssues = issues
+    .filter((i) => i.status === "Open")
+    .sort((a, b) => issueTime(b).localeCompare(issueTime(a)) || String(b.id).localeCompare(String(a.id)));
   const photos = captures.filter((c) => c.type === "photo");
   const inspections = captures
     .filter((c) => c.type === "inspection")
@@ -702,7 +710,7 @@ async function renderDashboard(id) {
 
     <div>
       <div class="section-label">Open Issues<span><span class="link" data-quick="issue-pdf">📄 PDF</span><span class="link" data-quick="issue" style="margin-left:14px;">+ Add</span></span></div>
-      <div class="card card-list" style="margin-top:10px;">
+      <div class="card card-list" style="margin-top:10px;" data-acc="issues" data-acc-total="${openIssues.length}">
         ${
           openIssues.length
             ? openIssues
@@ -727,7 +735,7 @@ async function renderDashboard(id) {
 
     <div>
       <div class="section-label">Materials<span><span class="link" data-quick="material-pdf">📄 PDF</span><span class="link" data-quick="material" style="margin-left:14px;">+ Add</span></span></div>
-      <div class="card card-list" style="margin-top:10px;">
+      <div class="card card-list" style="margin-top:10px;" data-acc="materials" data-acc-total="${materials.length}">
         ${
           materials.length
             ? materials
@@ -754,7 +762,7 @@ async function renderDashboard(id) {
 
     <div>
       <div class="section-label">Inspections<span><span class="link" data-quick="inspection-pdf">📄 PDF</span><span class="link" data-quick="inspection" style="margin-left:14px;">+ Add</span></span></div>
-      <div class="card card-list" style="margin-top:10px;">
+      <div class="card card-list" style="margin-top:10px;" data-acc="inspections" data-acc-total="${inspections.length}">
         ${
           inspections.length
             ? inspections
@@ -776,7 +784,7 @@ async function renderDashboard(id) {
 
     <div>
       <div class="section-label">Recent Captures${photos.length ? `<span><span class="link" data-manage="photo">🗑 Clear</span></span>` : ""}</div>
-      <div class="thumb-grid" style="margin-top:10px;">
+      <div class="thumb-grid" style="margin-top:10px;" data-acc="photos" data-acc-total="${photos.length}">
         ${
           photos.length
             ? photos
@@ -817,16 +825,16 @@ async function renderDashboard(id) {
 
     <div>
       <div class="section-label">Voice Notes${captures.some((c) => c.type === "voice") ? `<span><span class="link" data-manage="voice">🗑 Clear</span></span>` : ""}</div>
-      <div class="card card-list" style="margin-top:10px;">
+      <div class="card card-list" style="margin-top:10px;" data-acc="voice" data-acc-total="${captures.filter((c) => c.type === "voice").length}">
         ${
           captures.filter((c) => c.type === "voice").length
             ? captures
                 .filter((c) => c.type === "voice")
-                .slice(-5)
+                .slice(-10)
                 .reverse()
                 .map(
                   (v) => `
-          <div class="row" style="cursor:default; flex-direction:column; align-items:stretch; gap:8px;">
+          <div class="row voice-row" style="cursor:default; flex-direction:column; align-items:stretch; gap:8px;">
             <span class="desc">${escapeHtml(new Date(v.createdAt).toLocaleString())}</span>
             ${
               v.dataUrl
@@ -869,6 +877,7 @@ async function renderDashboard(id) {
   `;
 
   shell({ header, body, activeTab: "projects" });
+  applyDashboardAccordions();
 
   wireQuickCapture();
   $app.querySelector('[data-quick="issue"]').addEventListener("click", () => openIssueSheet(id));
@@ -1108,6 +1117,95 @@ async function renderAsk() {
 
 // ---------- Settings ----------
 
+// ---------- Accordions (compact dashboard lists) ----------
+// Each long list on a project shows only its latest item plus a count; tap
+// "Show all" to open the rest. On by default; Settings can turn it off.
+const ACCORDION_PREF = "moss_accordion";
+const ACCORDION_OPEN = "moss_accordion_open";
+
+function accordionEnabled() {
+  try {
+    return localStorage.getItem(ACCORDION_PREF) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function setAccordionEnabled(on) {
+  try {
+    localStorage.setItem(ACCORDION_PREF, on ? "on" : "off");
+  } catch {}
+}
+
+function accordionOpenSet() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(ACCORDION_OPEN) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveAccordionOpen(set) {
+  try {
+    localStorage.setItem(ACCORDION_OPEN, JSON.stringify([...set]));
+  } catch {}
+}
+
+const ACCORDION_KINDS = {
+  issues: { rows: "[data-issue-id]", noun: "open issues", singular: "issue" },
+  materials: { rows: "[data-material-id]", noun: "materials", singular: "material" },
+  inspections: { rows: "[data-inspection-id]", noun: "inspections", singular: "inspection" },
+  voice: { rows: ".voice-row", noun: "voice notes", singular: "voice note" },
+  photos: { rows: ".thumb", noun: "photos", singular: "photo" }
+};
+
+function applyDashboardAccordions() {
+  const on = accordionEnabled();
+  const openSet = accordionOpenSet();
+  $app.querySelectorAll("[data-acc]").forEach((box) => {
+    const kind = ACCORDION_KINDS[box.dataset.acc];
+    if (!kind) return;
+    const total = Number(box.dataset.accTotal) || 0;
+    // Count next to the section title ("Voice Notes · 6").
+    const label = box.previousElementSibling;
+    if (label && label.classList.contains("section-label") && total && label.firstChild && label.firstChild.nodeType === 3) {
+      label.firstChild.textContent = label.firstChild.textContent.trim() + " · " + total;
+    }
+    if (!on) return;
+    const rows = [...box.querySelectorAll(kind.rows)];
+    if (rows.length < 2) return;
+    const isOpen = openSet.has(box.dataset.acc);
+    const toggle = document.createElement("div");
+    toggle.className = box.classList.contains("thumb-grid") ? "" : "row";
+    toggle.setAttribute("role", "button");
+    toggle.dataset.accToggle = box.dataset.acc;
+    toggle.style.cursor = "pointer";
+    const paint = (open) => {
+      rows.slice(1).forEach((r) => (r.style.display = open ? "" : "none"));
+      const text = open ? "Show only the latest" : `Show all ${total} ${kind.noun}`;
+      toggle.innerHTML = box.classList.contains("thumb-grid")
+        ? `<span class="link" style="color:var(--amber-deep); font-weight:600; font-size:13px;">${open ? "▴" : "▾"} ${text}</span>`
+        : `<span class="icon">${open ? "▴" : "▾"}</span><span class="main"><span class="title">${text}</span>${open ? "" : `<span class="desc">Showing the latest ${kind.singular} · tap to see the rest</span>`}</span>`;
+      toggle.setAttribute("aria-expanded", String(open));
+    };
+    paint(isOpen);
+    toggle.addEventListener("click", () => {
+      const set = accordionOpenSet();
+      const nowOpen = !set.has(box.dataset.acc);
+      if (nowOpen) set.add(box.dataset.acc);
+      else set.delete(box.dataset.acc);
+      saveAccordionOpen(set);
+      paint(nowOpen);
+    });
+    if (box.classList.contains("thumb-grid")) {
+      toggle.style.marginTop = "6px";
+      box.after(toggle);
+    } else {
+      rows[0].after(toggle);
+    }
+  });
+}
+
 async function renderSettings() {
   await initMsal();
   const configured = msalConfigured();
@@ -1165,6 +1263,15 @@ async function renderSettings() {
         }</span></span>
         <input type="checkbox" class="switch" id="f-ai-translate" ${aiTranslateEnabled() ? "checked" : ""} ${aiConfigured() ? "" : "disabled"} aria-label="AI translate voice notes">
       </div>
+      <div class="row">
+        <span class="icon">🪜</span>
+        <span class="main"><span class="title">Compact lists</span><span class="desc">${accordionEnabled() ? "On — each list shows its latest item; tap to open the rest" : "Off — lists are shown in full"}</span></span>
+        <input type="checkbox" class="switch" id="f-accordion" ${accordionEnabled() ? "checked" : ""} aria-label="Compact lists">
+      </div>
+      <div class="row">
+        <span class="icon">💾</span>
+        <span class="main"><span class="title">Phone storage</span><span class="desc" id="storage-info">Checking…</span></span>
+      </div>
       <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
         <span class="main"><span class="icon">🎙️</span> <span class="title">Voice note language</span><span class="desc">What language you dictate voice notes in, for transcription</span></span>
         <select id="f-voice-lang" style="width:100%;">
@@ -1212,12 +1319,32 @@ async function renderSettings() {
     renderSettings();
   });
 
+  document.getElementById("f-accordion").addEventListener("change", (e) => {
+    setAccordionEnabled(e.target.checked);
+    toast(e.target.checked ? "Compact lists on" : "Compact lists off");
+    renderSettings();
+  });
+
   document.getElementById("f-ai-translate").addEventListener("change", (e) => {
     setAiTranslate(e.target.checked);
     toast(e.target.checked ? "AI voice note translation on" : "AI voice note translation off");
     renderSettings();
   });
 
+  (async () => {
+    const el = document.getElementById("storage-info");
+    if (!el) return;
+    try {
+      const est = navigator.storage?.estimate ? await navigator.storage.estimate() : null;
+      const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : null;
+      const mb = (n) => (n / 1048576 >= 1000 ? (n / 1073741824).toFixed(1) + " GB" : Math.round(n / 1048576) + " MB");
+      el.textContent = est && est.quota
+        ? `Using ${mb(est.usage || 0)} of ${mb(est.quota)}${persisted === true ? " · protected from auto-cleanup" : persisted === false ? " · the phone may clear it when low on space" : ""}`
+        : "Not available on this browser";
+    } catch {
+      el.textContent = "Not available on this browser";
+    }
+  })();
   document.getElementById("f-voice-lang").addEventListener("change", (e) => {
     setVoiceLang(e.target.value);
     toast("Voice note language saved");
@@ -1333,13 +1460,20 @@ function capturePhoto(projectId) {
   input.addEventListener("change", async () => {
     const file = input.files[0];
     if (!file) return;
-    const dataUrl = await fileToDataUrl(file);
+    const dataUrl = await photoFileToDataUrl(file);
     // Recorded once and reused for both the OneDrive upload and the local
     // record, so another device can later ask OneDrive for this exact file
     // by name (see hydrateRemoteCapture) — relying on file.name alone
     // wasn't reliable enough to build a re-download path from.
     const remoteFileName = file.name || `photo-${Date.now()}.jpg`;
-    const capture = await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name, remoteFileName });
+    let capture;
+    try {
+      capture = await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name, remoteFileName });
+    } catch (err) {
+      console.error("Saving photo failed", err);
+      toast("Couldn't save the photo — the phone may be out of space");
+      return;
+    }
     toast("Photo saved");
     if (currentRoute().name === "project") render();
     // Kept so the captions chain below can wait for the real file to
@@ -1753,7 +1887,7 @@ function openIssueSheet(projectId) {
       if (!file || closed) return;
       let dataUrl;
       try {
-        dataUrl = await fileToDataUrl(file);
+        dataUrl = await photoFileToDataUrl(file);
       } catch {
         toast("Couldn't read that photo");
         return;
@@ -1782,7 +1916,7 @@ function openIssueSheet(projectId) {
       const loaded = [];
       for (const file of files.slice(0, Math.max(0, room))) {
         try {
-          loaded.push({ dataUrl: await fileToDataUrl(file), file });
+          loaded.push({ dataUrl: await photoFileToDataUrl(file), file });
         } catch {
           toast("Couldn't read one of the photos");
         }
@@ -1947,6 +2081,7 @@ function openIssueSheet(projectId) {
   const save = async () => {
     if (!state.photo || !state.voice || state.recording || state.analyzing || state.translating || state.titleBusy || state.saving) return;
     state.saving = true;
+    const written = []; // ids saved so far, to clean up if the phone refuses part of it
     draw();
     try {
       // The note may have been edited after it was translated: refresh the
@@ -1970,6 +2105,7 @@ function openIssueSheet(projectId) {
       const photoId = MossDB.uid();
       const voiceId = MossDB.uid();
       const extraPhotoIds = state.extras.map(() => MossDB.uid());
+      written.push(photoId, voiceId, ...extraPhotoIds);
       const stamp = issueStamp(state.voice.startedAt);
       const note = state.note.trim();
       const title = state.title.trim() || (note ? note.slice(0, 60) : `${state.titleLang === "es" ? "Problema" : "Issue"} — ${stamp}`);
@@ -2041,8 +2177,11 @@ function openIssueSheet(projectId) {
       ]).then(() => syncCapturesWithOneDrive());
     } catch (err) {
       console.error("Saving issue failed", err);
+      for (const id of written) {
+        try { await MossDB.captures.remove(id); } catch {}
+      }
       state.saving = false;
-      toast("Couldn't save the issue — try again");
+      toast("Couldn't save the issue — the phone is out of space? Nothing was kept; try again");
       draw();
     }
   };
@@ -2806,7 +2945,7 @@ function openMaterialSheet(projectId) {
       if (!file || closed) return;
       let dataUrl;
       try {
-        dataUrl = await fileToDataUrl(file);
+        dataUrl = await photoFileToDataUrl(file);
       } catch {
         toast("Couldn't read that photo");
         return;
@@ -3365,7 +3504,7 @@ async function openInspectionSheet(preProjectId) {
       if (!file || closed) return;
       let dataUrl;
       try {
-        dataUrl = await fileToDataUrl(file);
+        dataUrl = await photoFileToDataUrl(file);
       } catch {
         toast("Couldn't read that photo");
         return;
@@ -3911,6 +4050,67 @@ async function showWeeklyReport() {
 }
 
 // ---------- helpers ----------
+
+// Photos are stored at up to 2000px (about 0.3-1 MB) instead of the phone's
+// full 5-12 MB original: five full-size photos per issue filled up the
+// phone's storage, and then saves were refused. The original file still goes
+// to OneDrive untouched. Falls back to the original if shrinking fails.
+async function photoFileToDataUrl(file) {
+  const original = await fileToDataUrl(file);
+  if (original.length < 1_500_000 || typeof prepareImageForPdf !== "function") return original;
+  try {
+    const small = await prepareImageForPdf(original, 2000, 0.85);
+    if (small && small.dataUrl && small.dataUrl.length < original.length) return small.dataUrl;
+  } catch {}
+  return original;
+}
+
+// If issues went missing (a save the phone refused half-way) but their voice
+// notes / photos are still stored, rebuild the issue from them. Returns how
+// many were rebuilt.
+async function recoverOrphanIssues() {
+  try {
+    const [issues, caps] = await Promise.all([MossDB.issues.all(), MossDB.captures.all()]);
+    const have = new Set(issues.map((i) => i.id));
+    const groups = new Map();
+    for (const c of caps) {
+      if (!c.issueId || have.has(c.issueId) || (c.type !== "photo" && c.type !== "voice")) continue;
+      if (!c.dataUrl) continue; // text-only copies synced from another device aren't ours to rebuild
+      if (Date.now() - new Date(c.createdAt || 0).getTime() < 120000) continue; // may be mid-save right now
+      if (!groups.has(c.issueId)) groups.set(c.issueId, []);
+      groups.get(c.issueId).push(c);
+    }
+    let n = 0;
+    for (const [issueId, list] of groups) {
+      list.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+      const photos = list.filter((c) => c.type === "photo");
+      const voice = list.find((c) => c.type === "voice");
+      const when = new Date((voice || list[0]).createdAt || Date.now());
+      const stamp = issueStamp(when);
+      const note = ((voice && voice.transcript) || "").trim();
+      const caption = ((photos.find((p) => p.caption) || {}).caption || "").trim();
+      const title = (caption || note).slice(0, 70) || "Recovered issue";
+      await MossDB.issues.add({
+        id: issueId,
+        projectId: list[0].projectId,
+        title,
+        trade: "General",
+        requirement: note ? `${stamp}\n${note}` : stamp,
+        photoId: photos[0] ? photos[0].id : null,
+        voiceId: voice ? voice.id : null,
+        ...(photos.length > 1 ? { extraPhotoIds: photos.slice(1).map((p) => p.id) } : {}),
+        recordedAt: when.toISOString(),
+        recovered: true,
+        ...(voice && voice.translation ? { translation: voice.translation, translationLang: voice.translationLang } : {})
+      });
+      n++;
+    }
+    return n;
+  } catch (err) {
+    console.error("Recovering issues failed", err);
+    return 0;
+  }
+}
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {

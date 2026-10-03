@@ -42,12 +42,27 @@ const MossDB = (() => {
     return db.transaction(store, mode).objectStore(store);
   }
 
+  // Resolves only when the write is truly committed to disk. (Before, it
+  // resolved as soon as the request was queued, so if the phone then refused
+  // the write — storage full, big photo — the app still said "saved" and the
+  // data silently vanished later.)
   async function put(store, value) {
-    const s = await tx(store, "readwrite");
+    const db = await open();
     return new Promise((resolve, reject) => {
-      const req = s.put(value);
-      req.onsuccess = () => resolve(value);
-      req.onerror = () => reject(req.error);
+      let t;
+      try {
+        t = db.transaction(store, "readwrite");
+      } catch (err) {
+        return reject(err);
+      }
+      t.oncomplete = () => resolve(value);
+      t.onabort = () => reject(t.error || new Error("The phone refused to save (storage may be full)"));
+      t.onerror = () => {}; // onabort follows and rejects
+      try {
+        t.objectStore(store).put(value);
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 
@@ -70,11 +85,18 @@ const MossDB = (() => {
   }
 
   async function del(store, id) {
-    const s = await tx(store, "readwrite");
+    const db = await open();
     return new Promise((resolve, reject) => {
-      const req = s.delete(id);
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => reject(req.error);
+      let t;
+      try {
+        t = db.transaction(store, "readwrite");
+      } catch (err) {
+        return reject(err);
+      }
+      t.oncomplete = () => resolve(true);
+      t.onabort = () => reject(t.error || new Error("The phone refused to delete"));
+      t.onerror = () => {};
+      t.objectStore(store).delete(id);
     });
   }
 
