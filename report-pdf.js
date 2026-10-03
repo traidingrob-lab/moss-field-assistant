@@ -181,6 +181,30 @@ async function buildIssuesPdf(sections, opts = {}) {
         y += ph + 10;
       }
 
+      // Extra photos (picked from the gallery): a row of small pictures.
+      const extraList = [];
+      for (const d of issue.extraPhotoDataUrls || []) {
+        const pr = await prepareImage(d);
+        if (pr) extraList.push(pr);
+      }
+      if (extraList.length) {
+        const gap = 6;
+        const cellW = (contentW - gap * 3) / 4;
+        const cellH = 105;
+        ensure(cellH + 8);
+        extraList.forEach((pr, k) => {
+          const sc = Math.min(cellW / pr.width, cellH / pr.height);
+          const w2 = pr.width * sc;
+          const h2 = pr.height * sc;
+          const x2 = M + k * (cellW + gap);
+          doc.addImage(pr.dataUrl, "JPEG", x2, y, w2, h2);
+          doc.setDrawColor(220, 224, 229);
+          doc.setLineWidth(0.5);
+          doc.rect(x2, y, w2, h2);
+        });
+        y += cellH + 10;
+      }
+
       const note = pdfSafe(issue.note).trim();
       if (note) {
         font("normal", 10.5);

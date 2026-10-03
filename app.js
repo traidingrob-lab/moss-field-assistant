@@ -1609,9 +1609,12 @@ async function startVoiceRecorder() {
   };
 }
 
+const MAX_ISSUE_PHOTOS = 5; // main photo + extras picked from the gallery
+
 function openIssueSheet(projectId) {
   const state = {
     photo: null, // { dataUrl, file }
+    extras: [], // more photos from the gallery: [{ dataUrl, file }]
     voice: null, // { blob, dataUrl, mimeType, transcript, startedAt }
     recorder: null,
     recording: false,
@@ -1645,7 +1648,16 @@ function openIssueSheet(projectId) {
     const photoBlock = `
       ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Issue photo">` : ""}
       <button class="btn ghost" id="i-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
-      <button class="btn ghost" id="i-gallery" ${state.recording || state.saving ? "disabled" : ""} style="margin-top:8px;">🖼 ${state.photo ? "Choose another from gallery" : "Choose from gallery"}</button>
+      ${
+        state.extras.length
+          ? `<div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;">${state.extras
+              .map(
+                (p, i) => `<div style="position:relative;"><img src="${p.dataUrl}" alt="Extra photo ${i + 1}" style="width:72px; height:72px; object-fit:cover; border-radius:10px; display:block;"><button class="btn ghost" data-rm-extra="${i}" ${state.saving ? "disabled" : ""} style="position:absolute; top:-6px; right:-6px; width:26px; height:26px; padding:0; border-radius:50%; font-size:13px; line-height:1;" aria-label="Remove photo">✕</button></div>`
+              )
+              .join("")}</div>`
+          : ""
+      }
+      <button class="btn ghost" id="i-gallery" ${state.recording || state.saving || (state.photo ? 1 : 0) + state.extras.length >= MAX_ISSUE_PHOTOS ? "disabled" : ""} style="margin-top:8px;">🖼 Choose from gallery${(state.photo ? 1 : 0) + state.extras.length ? ` (${(state.photo ? 1 : 0) + state.extras.length}/${MAX_ISSUE_PHOTOS})` : ` (up to ${MAX_ISSUE_PHOTOS})`}</button>
     `;
 
     let voiceBlock;
@@ -1712,7 +1724,13 @@ function openIssueSheet(projectId) {
     const $ = (id) => document.getElementById(id);
     $("i-cancel")?.addEventListener("click", closeSheet);
     $("i-photo")?.addEventListener("click", () => takePhoto());
-    $("i-gallery")?.addEventListener("click", () => takePhoto(true));
+    $("i-gallery")?.addEventListener("click", pickFromGallery);
+    $sheet.querySelectorAll("[data-rm-extra]").forEach((el) =>
+      el.addEventListener("click", () => {
+        state.extras.splice(Number(el.dataset.rmExtra), 1);
+        draw();
+      })
+    );
     $("i-rec")?.addEventListener("click", startRecording);
     $("i-stop")?.addEventListener("click", stopRecording);
     $("i-save")?.addEventListener("click", save);
@@ -1745,6 +1763,40 @@ function openIssueSheet(projectId) {
       state.description = "";
       draw();
       if (state.voice) runAnalysis(); // photo replaced after the note was recorded
+    });
+    input.click();
+  };
+
+  // Gallery: pick several photos at once (up to 5 per issue in total). If
+  // there is no main photo yet, the first one picked becomes it.
+  const pickFromGallery = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.multiple = true;
+    input.addEventListener("change", async () => {
+      const files = [...(input.files || [])];
+      if (!files.length || closed) return;
+      const room = MAX_ISSUE_PHOTOS - (state.photo ? 1 : 0) - state.extras.length;
+      if (files.length > room) toast(`Only ${MAX_ISSUE_PHOTOS} photos per issue`);
+      const loaded = [];
+      for (const file of files.slice(0, Math.max(0, room))) {
+        try {
+          loaded.push({ dataUrl: await fileToDataUrl(file), file });
+        } catch {
+          toast("Couldn't read one of the photos");
+        }
+      }
+      if (closed || !loaded.length) return;
+      let newMain = false;
+      if (!state.photo) {
+        state.photo = loaded.shift();
+        state.description = "";
+        newMain = true;
+      }
+      state.extras.push(...loaded);
+      draw();
+      if (newMain && state.voice) runAnalysis();
     });
     input.click();
   };
@@ -1917,6 +1969,7 @@ function openIssueSheet(projectId) {
       const issueId = MossDB.uid();
       const photoId = MossDB.uid();
       const voiceId = MossDB.uid();
+      const extraPhotoIds = state.extras.map(() => MossDB.uid());
       const stamp = issueStamp(state.voice.startedAt);
       const note = state.note.trim();
       const title = state.title.trim() || (note ? note.slice(0, 60) : `${state.titleLang === "es" ? "Problema" : "Issue"} — ${stamp}`);
@@ -1932,6 +1985,23 @@ function openIssueSheet(projectId) {
         caption: (aiCaptionsEnabled() && state.description) || title,
         issueId
       });
+      const extraNames = [];
+      for (let k = 0; k < state.extras.length; k++) {
+        const ex = state.extras[k];
+        const exExt = { "image/png": "png", "image/heic": "heic", "image/heif": "heif", "image/webp": "webp" }[ex.file.type] || "jpg";
+        const exName = `issue-photo-${now}-${k + 2}.${exExt}`;
+        extraNames.push(exName);
+        await MossDB.captures.add({
+          id: extraPhotoIds[k],
+          projectId,
+          type: "photo",
+          dataUrl: ex.dataUrl,
+          name: ex.file.name,
+          remoteFileName: exName,
+          caption: title,
+          issueId
+        });
+      }
       await MossDB.captures.add({
         id: voiceId,
         projectId,
@@ -1950,12 +2020,14 @@ function openIssueSheet(projectId) {
         requirement: note ? `${stamp}\n${note}` : stamp,
         photoId,
         voiceId,
+        ...(extraPhotoIds.length ? { extraPhotoIds } : {}),
         recordedAt: state.voice.startedAt.toISOString(),
         ...(state.translation ? { translation: state.translation, translationLang: state.translationLang } : {})
       });
 
       const photoFile = state.photo.file;
       const voiceBlob = state.voice.blob;
+      const extraFiles = state.extras.map((x) => x.file);
       closeSheet();
       toast("Issue created");
       if (currentRoute().name === "project" || currentRoute().name === "home") render();
@@ -1964,6 +2036,7 @@ function openIssueSheet(projectId) {
       // devices only once both have actually finished uploading.
       Promise.all([
         syncCaptureToOneDrive(projectId, "photo", photoFile, photoName),
+        ...extraFiles.map((f, k) => syncCaptureToOneDrive(projectId, "photo", f, extraNames[k])),
         syncCaptureToOneDrive(projectId, "voice", voiceBlob, voiceName)
       ]).then(() => syncCapturesWithOneDrive());
     } catch (err) {
@@ -1992,12 +2065,20 @@ function openIssueSheet(projectId) {
 // Opens a saved issue with its linked photo, stamped note and voice note.
 function openIssueDetail(issue, captures) {
   const photo = captures.find((c) => c.id === issue.photoId);
+  const extraPhotos = (issue.extraPhotoIds || []).map((id) => captures.find((c) => c.id === id)).filter((c) => c?.dataUrl);
   const voice = captures.find((c) => c.id === issue.voiceId);
   const noteText = issuePdfData(issue, captures).note.trim();
   openSheet(`
     <h2>${escapeHtml(issue.title)}</h2>
     <span class="desc">${escapeHtml(issue.trade)}</span>
     ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Issue photo">` : ""}
+    ${
+      extraPhotos.length
+        ? `<div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:8px 0;">${extraPhotos
+            .map((p, i) => `<img src="${p.dataUrl}" alt="Issue photo ${i + 2}" style="width:100%; border-radius:10px; display:block;">`)
+            .join("")}</div>`
+        : ""
+    }
     ${issue.requirement ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(issue.requirement)}</div>` : ""}
     ${translationCardHtml(issue.translation, issue.translationLang)}
     ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
@@ -2066,7 +2147,8 @@ function issuePdfData(issue, captures) {
     note,
     translation: issue.translation || "",
     translationLabel: issue.translation ? translationLabel(issue.translationLang) : "",
-    photoDataUrl: photo?.dataUrl || null
+    photoDataUrl: photo?.dataUrl || null,
+    extraPhotoDataUrls: (issue.extraPhotoIds || []).map((id) => captures.find((c) => c.id === id)?.dataUrl).filter(Boolean)
   };
 }
 
@@ -2379,6 +2461,9 @@ async function deleteCaptureAndUnlink(c) {
   if (c.issueId) {
     const issue = (await MossDB.issues.forProject(c.projectId)).find((i) => i.id === c.issueId);
     if (issue && issue[field] === c.id) await MossDB.issues.add({ ...issue, [field]: null });
+    else if (issue && c.type === "photo" && (issue.extraPhotoIds || []).includes(c.id)) {
+      await MossDB.issues.add({ ...issue, extraPhotoIds: issue.extraPhotoIds.filter((id) => id !== c.id) });
+    }
   }
   if (c.materialId) {
     const m = (await MossDB.captures.forProject(c.projectId)).find((x) => x.id === c.materialId);
