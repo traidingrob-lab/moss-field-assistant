@@ -1130,6 +1130,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
+const APP_VERSION = "37"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1272,6 +1273,10 @@ async function renderSettings() {
             : "Off — voice notes are not translated"
         }</span></span>
         <input type="checkbox" class="switch" id="f-ai-translate" ${aiTranslateEnabled() ? "checked" : ""} ${aiConfigured() ? "" : "disabled"} aria-label="AI translate voice notes">
+      </div>
+      <div class="row">
+        <span class="icon">ℹ️</span>
+        <span class="main"><span class="title">App version</span><span class="desc">${APP_VERSION}</span></span>
       </div>
       <div class="row">
         <span class="icon">🪜</span>
@@ -2220,6 +2225,11 @@ function openIssueDetail(issue, captures) {
   openSheet(`
     <h2>${escapeHtml(issue.title)}</h2>
     <span class="desc">${escapeHtml(issue.trade)}</span>
+    ${
+      issue.status === "Completed"
+        ? `<button class="btn ghost" id="d-restore" style="width:100%;">↩ Back to Open Issues</button>`
+        : `<button class="btn primary" id="d-archive" style="width:100%;">🗄️ Fixed — move to drawer</button>`
+    }
     ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Issue photo">` : ""}
     ${
       extraPhotos.length
@@ -2232,11 +2242,6 @@ function openIssueDetail(issue, captures) {
     ${translationCardHtml(issue.translation, issue.translationLang)}
     ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
-    ${
-      issue.status === "Completed"
-        ? `<button class="btn ghost" id="d-restore" style="width:100%;">↩ Back to Open Issues</button>`
-        : `<button class="btn ghost" id="d-archive" style="width:100%;">🗄️ Fixed — move to drawer</button>`
-    }
     ${closeButton()}
   `);
   wireCloseButton();
