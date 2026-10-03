@@ -1645,6 +1645,7 @@ function openIssueSheet(projectId) {
     const photoBlock = `
       ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Issue photo">` : ""}
       <button class="btn ghost" id="i-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
+      <button class="btn ghost" id="i-gallery" ${state.recording || state.saving ? "disabled" : ""} style="margin-top:8px;">🖼 ${state.photo ? "Choose another from gallery" : "Choose from gallery"}</button>
     `;
 
     let voiceBlock;
@@ -1710,7 +1711,8 @@ function openIssueSheet(projectId) {
   const wire = () => {
     const $ = (id) => document.getElementById(id);
     $("i-cancel")?.addEventListener("click", closeSheet);
-    $("i-photo")?.addEventListener("click", takePhoto);
+    $("i-photo")?.addEventListener("click", () => takePhoto());
+    $("i-gallery")?.addEventListener("click", () => takePhoto(true));
     $("i-rec")?.addEventListener("click", startRecording);
     $("i-stop")?.addEventListener("click", stopRecording);
     $("i-save")?.addEventListener("click", save);
@@ -1723,11 +1725,11 @@ function openIssueSheet(projectId) {
     $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
   };
 
-  const takePhoto = () => {
+  const takePhoto = (fromGallery = false) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
-    input.capture = "environment";
+    if (!fromGallery) input.capture = "environment";
     input.addEventListener("change", async () => {
       const file = input.files[0];
       if (!file || closed) return;
@@ -2615,6 +2617,7 @@ function openMaterialSheet(projectId) {
     const photoBlock = `
       ${state.photo ? `<img class="issue-photo" src="${state.photo.dataUrl}" alt="Material photo">` : ""}
       <button class="btn ${state.photo ? "ghost" : "primary"}" id="m-photo" ${state.recording || state.saving ? "disabled" : ""}>${state.photo ? "📸 Retake photo" : "📸 Take photo"}</button>
+      <button class="btn ghost" id="m-gallery" ${state.recording || state.saving ? "disabled" : ""} style="margin-top:8px;">🖼 ${state.photo ? "Choose another from gallery" : "Choose from gallery"}</button>
     `;
 
     let voiceBlock;
@@ -2684,7 +2687,8 @@ function openMaterialSheet(projectId) {
   const wire = () => {
     const $ = (id) => document.getElementById(id);
     $("m-cancel")?.addEventListener("click", closeSheet);
-    $("m-photo")?.addEventListener("click", takePhoto);
+    $("m-photo")?.addEventListener("click", () => takePhoto());
+    $("m-gallery")?.addEventListener("click", () => takePhoto(true));
     $("m-rec")?.addEventListener("click", startRecording);
     $("m-stop")?.addEventListener("click", stopRecording);
     $("m-ai")?.addEventListener("click", runIdentify);
@@ -2707,11 +2711,11 @@ function openMaterialSheet(projectId) {
     $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
   };
 
-  const takePhoto = () => {
+  const takePhoto = (fromGallery = false) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
-    input.capture = "environment";
+    if (!fromGallery) input.capture = "environment";
     input.addEventListener("change", async () => {
       const file = input.files[0];
       if (!file || closed) return;
@@ -3201,7 +3205,8 @@ async function openInspectionSheet(preProjectId) {
                 .join("")}</div>`
             : ""
         }
-        <button class="btn ghost" id="in-photo" ${state.recording || state.saving || state.photos.length >= MAX_INSPECTION_PHOTOS ? "disabled" : ""}>📸 ${state.photos.length ? "Add another photo" : "Add photo"} ${state.photos.length ? `(${state.photos.length}/${MAX_INSPECTION_PHOTOS})` : ""}</button>`
+        <button class="btn ghost" id="in-photo" ${state.recording || state.saving || state.photos.length >= MAX_INSPECTION_PHOTOS ? "disabled" : ""}>📸 ${state.photos.length ? "Add another photo" : "Add photo"} ${state.photos.length ? `(${state.photos.length}/${MAX_INSPECTION_PHOTOS})` : ""}</button>
+        <button class="btn ghost" id="in-gallery" ${state.recording || state.saving || state.photos.length >= MAX_INSPECTION_PHOTOS ? "disabled" : ""} style="margin-top:8px;">🖼 Choose from gallery</button>`
       : `<button class="btn ghost" disabled>📸 Choose the project first</button>`;
 
     $sheet.innerHTML = `
@@ -3244,7 +3249,8 @@ async function openInspectionSheet(preProjectId) {
     $("in-project")?.addEventListener("change", (e) => { state.projectId = e.target.value; draw(); });
     $("in-rec")?.addEventListener("click", startRecording);
     $("in-stop")?.addEventListener("click", stopRecording);
-    $("in-photo")?.addEventListener("click", takePhoto);
+    $("in-photo")?.addEventListener("click", () => takePhoto());
+    $("in-gallery")?.addEventListener("click", () => takePhoto(true));
     $("in-ai")?.addEventListener("click", runAnalysis);
     $("in-retr")?.addEventListener("click", () => runTranslate(true));
     $("in-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
@@ -3264,11 +3270,11 @@ async function openInspectionSheet(preProjectId) {
     $("in-inspector")?.addEventListener("input", (e) => { state.inspector = e.target.value; });
   };
 
-  const takePhoto = () => {
+  const takePhoto = (fromGallery = false) => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "image/*";
-    input.capture = "environment";
+    if (!fromGallery) input.capture = "environment";
     input.addEventListener("change", async () => {
       const file = input.files[0];
       if (!file || closed) return;
