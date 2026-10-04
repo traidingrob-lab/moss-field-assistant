@@ -1147,7 +1147,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "38"; // matches the sw.js cache number
+const APP_VERSION = "39"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -3957,8 +3957,77 @@ function wireCloseButton() {
   document.getElementById("sheet-close")?.addEventListener("click", closeSheet);
 }
 
+// Shared by the three reports below -------------------------------------
+
+function reportDay(d) {
+  try {
+    return d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  } catch {
+    return d.toDateString();
+  }
+}
+
+const clip = (t, n) => {
+  const x = String(t || "").replace(/\s+/g, " ").trim();
+  return x.length > n ? x.slice(0, n - 1) + "…" : x;
+};
+
+// What happened in each active project since `since`.
+async function gatherActivity(since) {
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
+  const allIssues = await MossDB.issues.all();
+  const out = [];
+  for (const p of projects) {
+    const issues = allIssues.filter((i) => i.projectId === p.id);
+    const caps = await MossDB.captures.forProject(p.id);
+    const when = (x) => new Date(x.recordedAt || x.createdAt || 0);
+    out.push({
+      project: p,
+      newIssues: issues.filter((i) => when(i) >= since),
+      openIssues: issues.filter((i) => i.status === "Open"),
+      fixedIssues: issues.filter((i) => i.status === "Completed" && i.archivedAt && new Date(i.archivedAt) >= since),
+      inspections: caps.filter((c) => c.type === "inspection" && when(c) >= since),
+      materials: caps.filter((c) => c.type === "material" && new Date(c.createdAt || 0) >= since),
+      photos: caps.filter((c) => c.type === "photo" && c.dataUrl && new Date(c.createdAt || 0) >= since),
+      voices: caps.filter((c) => c.type === "voice" && new Date(c.createdAt || 0) >= since)
+    });
+  }
+  return out;
+}
+
+const issueBullet = (i) => `[${i.trade || "General"}] ${i.title}${i.requirement ? " - " + clip(String(i.requirement).split("\n").slice(i.recordedAt ? 1 : 0).join(" "), 160) : ""}`;
+const inspectionBullet = (c) => `${c.name || "Inspection"} - ${inspectionResultInfo(c.result).short || c.result || "?"}${c.inspector ? " (inspector " + c.inspector + ")" : ""}${c.comments ? ": " + clip(c.comments, 200) : ""}`;
+
+// A report sheet's "Create PDF" button.
+function wireReportPdf(report, fileBase) {
+  const btn = document.getElementById("rep-pdf");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!window.jspdf) {
+      toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Building PDF…";
+    try {
+      const blob = await buildTextReportPdf(report);
+      showPdfReady(blob, fileBase.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ") + ".pdf", 1, "report");
+    } catch (err) {
+      console.error("Report PDF failed", err);
+      toast("Couldn't build the PDF — try again");
+      btn.disabled = false;
+      btn.textContent = "📄 Create PDF";
+    }
+  });
+}
+
+const reportPdfButton = () => `<button class="btn primary" id="rep-pdf" style="width:100%;">📄 Create PDF</button>`;
+
+// ---------- Reports ----------
+
 async function showNextSteps() {
   const issues = (await MossDB.issues.all()).filter((i) => i.status === "Open");
+  const activity = await gatherActivity(new Date(Date.now() - 7 * 86400000));
 
   let aiSummary = "";
   if (aiConfigured()) {
@@ -3975,6 +4044,19 @@ async function showNextSteps() {
     }
   }
 
+  const now = new Date();
+  const blocks = [];
+  if (aiSummary && !aiSummary.startsWith("⚠️")) {
+    blocks.push({ type: "label", text: "Priority next steps" }, { type: "text", text: aiSummary });
+  }
+  for (const a of activity) {
+    if (!a.openIssues.length) continue;
+    blocks.push({ type: "project", name: a.project.name, meta: `${a.openIssues.length} open issue${a.openIssues.length === 1 ? "" : "s"}` });
+    blocks.push({ type: "bullets", items: a.openIssues.map(issueBullet) });
+  }
+  if (!blocks.length) blocks.push({ type: "text", text: "Nothing outstanding." });
+  const report = { title: "Next Steps", subtitle: reportDay(now), blocks };
+
   openSheet(`
     <h2>Next Steps</h2>
     ${
@@ -3990,14 +4072,19 @@ async function showNextSteps() {
       }
     </div>
     ${!aiConfigured() ? `<p class="empty">Add a Claude API key in Settings for an AI-prioritized summary here.</p>` : ""}
+    ${reportPdfButton()}
     ${closeButton()}
   `);
   wireCloseButton();
+  wireReportPdf(report, `Next Steps - ${now.toISOString().slice(0, 10)}`);
 }
 
 async function showDailyReport() {
   const projects = (await MossDB.projects.all()).filter(isVisibleProject);
   const today = new Date().toDateString();
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const activity = await gatherActivity(startOfDay);
   let lines = [];
   for (const p of projects) {
     const issues = await MossDB.issues.forProject(p.id);
@@ -4035,6 +4122,31 @@ async function showDailyReport() {
     }
   }
 
+  // The PDF: summary, then for each project what was logged today.
+  const blocks = [];
+  if (narrative && !narrative.startsWith("⚠️")) blocks.push({ type: "label", text: "Summary" }, { type: "text", text: narrative });
+  let any = false;
+  for (const a of activity) {
+    const hasStuff = a.newIssues.length || a.inspections.length || a.materials.length || a.voices.length || a.photos.length;
+    if (!hasStuff) continue;
+    any = true;
+    blocks.push({ type: "project", name: a.project.name, meta: a.project.address || "" });
+    if (a.newIssues.length) blocks.push({ type: "label", text: `New issues (${a.newIssues.length})` }, { type: "bullets", items: a.newIssues.map(issueBullet) });
+    if (a.inspections.length) blocks.push({ type: "label", text: `Inspections (${a.inspections.length})` }, { type: "bullets", items: a.inspections.map(inspectionBullet) });
+    if (a.materials.length) blocks.push({ type: "label", text: `Materials added (${a.materials.length})` }, { type: "bullets", items: a.materials.map((m) => `${m.name}${m.quantity ? " x " + m.quantity : ""}${m.dimensions ? " (" + m.dimensions + ")" : ""}`) });
+    const spoken = a.voices.filter((v) => v.transcript);
+    if (spoken.length) {
+      blocks.push({ type: "label", text: `Voice notes (${a.voices.length})` });
+      blocks.push({ type: "bullets", items: spoken.slice(0, 8).map((v) => clip(v.transcript, 500) + (v.translation ? `  [${translationLabel(v.translationLang)}: ${clip(v.translation, 500)}]` : "")) });
+    }
+    if (a.photos.length) {
+      blocks.push({ type: "label", text: `Photos (${a.photos.length})` }, { type: "photos", photos: a.photos.slice(-9).map((p) => p.dataUrl) });
+      if (a.photos.length > 9) blocks.push({ type: "note", text: `Showing the latest 9 of ${a.photos.length} photos.` });
+    }
+  }
+  if (!any) blocks.push({ type: "text", text: "Nothing captured yet today." });
+  const report = { title: "Daily Report", subtitle: reportDay(new Date()), blocks };
+
   openSheet(`
     <h2>Today's Daily Log</h2>
     <div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">
@@ -4047,13 +4159,18 @@ async function showDailyReport() {
         ? "Saved to each project's Daily Logs."
         : ""
     }</p>
+    ${reportPdfButton()}
     ${closeButton()}
   `);
   wireCloseButton();
+  wireReportPdf(report, `Daily Report - ${new Date().toISOString().slice(0, 10)}`);
   if (currentRoute().name === "project" && lines.length) render();
 }
 
 async function showWeeklyReport() {
+  const now = new Date();
+  const since = new Date(now.getTime() - 7 * 86400000);
+  const activity = await gatherActivity(since);
   let narrative = "";
   if (aiConfigured()) {
     try {
@@ -4069,16 +4186,38 @@ async function showWeeklyReport() {
     }
   }
 
+  const range = `${since.toLocaleDateString()} - ${now.toLocaleDateString()}`;
+  const blocks = [];
+  if (narrative && !narrative.startsWith("⚠️")) blocks.push({ type: "label", text: "Summary" }, { type: "text", text: narrative });
+  const factLines = [];
+  for (const a of activity) {
+    const stats = `New issues: ${a.newIssues.length}  |  Fixed: ${a.fixedIssues.length}  |  Open now: ${a.openIssues.length}  |  Inspections: ${a.inspections.length}  |  Materials added: ${a.materials.length}  |  Photos: ${a.photos.length}`;
+    const quiet = !a.newIssues.length && !a.fixedIssues.length && !a.openIssues.length && !a.inspections.length && !a.materials.length && !a.photos.length;
+    if (quiet) continue;
+    factLines.push(`${a.project.name}: ${a.newIssues.length} new, ${a.fixedIssues.length} fixed, ${a.openIssues.length} open, ${a.inspections.length} inspection(s)`);
+    blocks.push({ type: "project", name: a.project.name, meta: a.project.address || "" });
+    blocks.push({ type: "text", text: stats });
+    if (a.openIssues.length) blocks.push({ type: "label", text: `Open issues (${a.openIssues.length})` }, { type: "bullets", items: a.openIssues.map(issueBullet) });
+    if (a.fixedIssues.length) blocks.push({ type: "label", text: `Fixed this week (${a.fixedIssues.length})` }, { type: "bullets", items: a.fixedIssues.map((i) => `[${i.trade || "General"}] ${i.title}`) });
+    if (a.inspections.length) blocks.push({ type: "label", text: `Inspections this week (${a.inspections.length})` }, { type: "bullets", items: a.inspections.map(inspectionBullet) });
+    if (a.materials.length) blocks.push({ type: "label", text: `Materials added (${a.materials.length})` }, { type: "bullets", items: a.materials.map((m) => `${m.name}${m.quantity ? " x " + m.quantity : ""}${m.dimensions ? " (" + m.dimensions + ")" : ""}`) });
+  }
+  if (!blocks.length) blocks.push({ type: "text", text: "No activity in the last 7 days." });
+  const report = { title: "Weekly Report", subtitle: range, blocks };
+
   openSheet(`
     <h2>Weekly Report</h2>
     ${
       narrative
         ? `<div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">${escapeHtml(narrative)}</div>`
-        : `<p class="empty">Add a Claude API key in Settings to generate weekly reports (completed work, inspections, change orders, next week's plan).</p>`
+        : `<div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6;">${factLines.length ? factLines.map(escapeHtml).join("<br>") : "No activity in the last 7 days."}</div>
+           <p class="empty">Add a Claude API key in Settings for a written weekly summary (completed work, inspections, next week's plan).</p>`
     }
+    ${reportPdfButton()}
     ${closeButton()}
   `);
   wireCloseButton();
+  wireReportPdf(report, `Weekly Report - ${now.toISOString().slice(0, 10)}`);
 }
 
 // ---------- helpers ----------

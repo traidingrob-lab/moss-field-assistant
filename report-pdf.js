@@ -770,3 +770,168 @@ async function buildInspectionsPdf(sections, opts = {}) {
 
   return doc.output("blob");
 }
+
+
+// ---------- Text reports: Daily Report, Weekly Report, Next Steps ----------
+// report = { title, subtitle, blocks: [...] } where a block is one of
+//   { type: "label",   text }                       small bold heading
+//   { type: "text",    text }                       paragraph(s)
+//   { type: "bullets", items: [text, ...] }
+//   { type: "project", name, meta }                 big project heading + rule
+//   { type: "photos",  photos: [dataUrl, ...] }     3-column photo grid
+//   { type: "note",    text }                       small grey italic line
+async function buildTextReportPdf(report, opts = {}) {
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error("PDF library (jspdf.umd.min.js) isn't loaded.");
+  const { jsPDF } = window.jspdf;
+  const prepareImage = opts.prepareImage || ((d) => prepareImageForPdf(d, 700, 0.72));
+  const generatedAt = opts.generatedAt || new Date();
+
+  const doc = new jsPDF({ unit: "pt", format: "letter" });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const M = 42;
+  const contentW = pageW - M * 2;
+  const bottom = pageH - 56;
+  const INK = [28, 37, 48];
+  const SOFT = [107, 114, 128];
+  const AMBER = [217, 119, 6];
+  let y = M;
+
+  const ensure = (h) => {
+    if (y + h > bottom) {
+      doc.addPage();
+      y = M;
+    }
+  };
+  const color = (c) => doc.setTextColor(c[0], c[1], c[2]);
+  const font = (style, size) => {
+    doc.setFont("helvetica", style);
+    doc.setFontSize(size);
+  };
+  const rule = (c, width) => {
+    doc.setDrawColor(c[0], c[1], c[2]);
+    doc.setLineWidth(width);
+    doc.line(M, y, pageW - M, y);
+  };
+  // Writes wrapped text line by line so long text continues on the next page.
+  const paragraph = (text, x, width, size, style, col, lead) => {
+    font(style, size);
+    color(col);
+    for (const raw of String(text).split("\n")) {
+      const lines = raw.trim() ? doc.splitTextToSize(raw, width) : [""];
+      for (const line of lines) {
+        ensure(lead);
+        if (line) doc.text(line, x, y + size);
+        y += lead;
+      }
+    }
+  };
+
+  let dateText;
+  try {
+    dateText = generatedAt.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  } catch {
+    dateText = generatedAt.toDateString();
+  }
+  dateText = pdfSafe(dateText);
+
+  font("bold", 10);
+  color(AMBER);
+  doc.text("MOSS AI FIELD ASSISTANT", M, y + 8);
+  y += 16;
+  font("bold", 22);
+  color(INK);
+  doc.text(pdfSafe(report.title || "Report"), M, y + 20);
+  y += 28;
+  font("normal", 10);
+  color(SOFT);
+  doc.text(pdfSafe(report.subtitle || dateText), M, y + 8);
+  y += 18;
+  rule([200, 205, 212], 0.8);
+  y += 14;
+
+  for (const block of report.blocks || []) {
+    if (block.type === "project") {
+      ensure(60);
+      y += 8;
+      font("bold", 15);
+      color(INK);
+      doc.text(pdfSafe(block.name), M, y + 13);
+      y += 20;
+      if (block.meta) {
+        font("normal", 9);
+        color(SOFT);
+        doc.text(pdfSafe(block.meta), M, y + 8);
+        y += 14;
+      }
+      rule([229, 231, 235], 0.6);
+      y += 8;
+    } else if (block.type === "label") {
+      ensure(32);
+      y += 4;
+      paragraph(pdfSafe(block.text), M, contentW, 10.5, "bold", AMBER, 15);
+      y += 1;
+    } else if (block.type === "text") {
+      paragraph(pdfSafe(block.text), M, contentW, 10.5, "normal", INK, 14.5);
+      y += 6;
+    } else if (block.type === "note") {
+      paragraph(pdfSafe(block.text), M, contentW, 9.5, "italic", SOFT, 13);
+      y += 4;
+    } else if (block.type === "bullets") {
+      for (const item of block.items || []) {
+        const lines = doc.splitTextToSize(pdfSafe(item), contentW - 16);
+        ensure(14.5);
+        font("normal", 10.5);
+        color(INK);
+        doc.text("-", M + 4, y + 10.5);
+        for (const line of lines) {
+          ensure(14.5);
+          font("normal", 10.5);
+          color(INK);
+          doc.text(line, M + 16, y + 10.5);
+          y += 14.5;
+        }
+        y += 1.5;
+      }
+      y += 4;
+    } else if (block.type === "photos") {
+      const prepared = [];
+      for (const d of block.photos || []) {
+        const pr = await prepareImage(d);
+        if (pr) prepared.push(pr);
+      }
+      const gap = 8;
+      const cellW = (contentW - gap * 2) / 3;
+      const cellH = 135;
+      for (let k = 0; k < prepared.length; k += 3) {
+        ensure(cellH + 8);
+        prepared.slice(k, k + 3).forEach((pr, c) => {
+          const sc = Math.min(cellW / pr.width, cellH / pr.height);
+          const w = pr.width * sc;
+          const h = pr.height * sc;
+          const x = M + c * (cellW + gap);
+          doc.addImage(pr.dataUrl, "JPEG", x, y, w, h);
+          doc.setDrawColor(220, 224, 229);
+          doc.setLineWidth(0.5);
+          doc.rect(x, y, w, h);
+        });
+        y += cellH + 8;
+      }
+      const missing = (block.photos || []).length - prepared.length;
+      if (missing > 0) {
+        paragraph(`(${missing} photo${missing === 1 ? "" : "s"} couldn't be included in this PDF)`, M, contentW, 9, "italic", SOFT, 13);
+      }
+      y += 4;
+    }
+  }
+
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p);
+    font("normal", 8);
+    color(SOFT);
+    doc.text(`Moss AI Field Assistant  -  ${dateText}`, M, pageH - 28);
+    doc.text(`Page ${p} of ${pages}`, pageW - M, pageH - 28, { align: "right" });
+  }
+  return doc.output("blob");
+}
