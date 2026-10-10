@@ -1153,7 +1153,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "42"; // matches the sw.js cache number
+const APP_VERSION = "43"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2834,6 +2834,7 @@ async function buildVoiceMessage(v, lang) {
     }
   }
   const noteText = note && tr && (trLang === "en" || trLang === "es") && trLang === lang ? tr : note;
+  v.__origLang = trLang === "en" ? "es" : trLang === "es" ? "en" : "";
   const lines = [`🎤 ${L.voice}`];
   if (project) lines.push(`${L.project}: ${project.name}${project.address ? " — " + project.address : ""}`);
   if (v.createdAt) lines.push(`${L.date}: ${new Date(v.createdAt).toLocaleString(lang === "es" ? "es-US" : "en-US")}`);
@@ -2848,6 +2849,7 @@ function openVoiceShareSheet(v) {
     build: (lang) => buildVoiceMessage(v, lang),
     fallback: `🎤 ${v.transcript || ""}`,
     files: v.dataUrl ? [{ url: v.dataUrl, name: `voice-note.${ext}`, type: mime }] : [],
+    filesLang: () => v.__origLang || (v.translationLang === "en" ? "es" : v.translationLang === "es" ? "en" : ""),
     noun: "audio file"
   });
 }
@@ -2900,6 +2902,8 @@ async function openShareSheet(opts) {
   let closed = false;
 
   const draw = (busy) => {
+    const fl = typeof opts.filesLang === "function" ? opts.filesLang() : opts.filesLang || "";
+    const mismatch = !!fl && fl !== lang;
     const probe = photoUrls.length && typeof File !== "undefined" ? new File([new Blob(["x"])], photoUrls[0].name, { type: photoUrls[0].type }) : null;
     const canSharePhotos = !!(probe && navigator.canShare && navigator.canShare({ files: [probe] }));
     openSheet(
@@ -2919,7 +2923,7 @@ async function openShareSheet(opts) {
       ${
         photoUrls.length && !busy
           ? canSharePhotos
-            ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="sh-photos" checked style="width:20px; height:20px;"> Include ${photoUrls.length} ${noun}${photoUrls.length === 1 ? "" : "s"} (opens the share sheet)</label>`
+            ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="sh-photos" ${mismatch ? "" : "checked"} style="width:20px; height:20px;"> ${mismatch ? `Also include the ORIGINAL audio (it stays in ${fl === "es" ? "Spanish" : "English"} — the text is in ${lang === "es" ? "Spanish" : "English"})` : `Include ${photoUrls.length} ${noun}${photoUrls.length === 1 ? "" : "s"} (opens the share sheet)`}</label>`
             : `<p class="empty" style="text-align:left;">The ${noun}${photoUrls.length === 1 ? "" : "s"} can't be attached on this device from here — the text goes without them.</p>`
           : ""
       }
