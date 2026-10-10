@@ -865,7 +865,10 @@ async function renderDashboard(id) {
             }
             ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
             ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
-            <button class="btn ghost" data-edit-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">✏️ Edit text</button>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn ghost" data-edit-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px;">✏️ Edit text</button>
+              <button class="btn ghost" data-delete-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; color:var(--red, #DC2626);">🗑 Delete</button>
+            </div>
             ${v.transcript ? `<button class="btn ghost" data-share-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">💬 Share as text</button>` : ""}
             ${v.transcript && aiConfigured() ? `<button class="btn ghost" data-retr-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">🌐 ${v.translation ? "Translate again" : "Translate"}</button>` : ""}
           </div>`
@@ -935,6 +938,15 @@ async function renderDashboard(id) {
     el.addEventListener("click", () => {
       const issue = issues.find((i) => i.id === el.dataset.issueId);
       if (issue) openIssueDetail(issue, captures);
+    });
+  });
+  $app.querySelectorAll("[data-delete-voice]").forEach((el) => {
+    const v = captures.find((c) => c.id === el.dataset.deleteVoice);
+    if (!v) return;
+    el.addEventListener("click", async () => {
+      const [issues, caps] = await Promise.all([MossDB.issues.forProject(v.projectId), MossDB.captures.forProject(v.projectId)]);
+      const owner = captureOwnerLabel(v, issues, caps.filter((c) => c.type === "material"), caps.filter((c) => c.type === "inspection"));
+      confirmCaptureDelete("voice", v.projectId, [v], owner, true);
     });
   });
   $app.querySelectorAll("[data-edit-voice]").forEach((el) => {
@@ -1158,7 +1170,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "44"; // matches the sw.js cache number
+const APP_VERSION = "45"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2717,7 +2729,7 @@ async function openCaptureManager(kind, projectId) {
   document.getElementById("cm-clear-all")?.addEventListener("click", () => confirmCaptureDelete(kind, projectId, loose, ""));
 }
 
-function confirmCaptureDelete(kind, projectId, items, owner) {
+function confirmCaptureDelete(kind, projectId, items, owner, fromRow = false) {
   const noun = kind === "photo" ? "photo" : "voice note";
   const many = items.length > 1;
   openSheet(`
@@ -2734,7 +2746,7 @@ function confirmCaptureDelete(kind, projectId, items, owner) {
       <button class="btn primary" id="cm-confirm-delete" style="background:var(--red, #DC2626);">Delete${many ? " all" : ""}</button>
     </div>
   `);
-  document.getElementById("cm-cancel-delete").addEventListener("click", () => openCaptureManager(kind, projectId));
+  document.getElementById("cm-cancel-delete").addEventListener("click", () => (fromRow ? closeSheet() : openCaptureManager(kind, projectId)));
   document.getElementById("cm-confirm-delete").addEventListener("click", async () => {
     const btn = document.getElementById("cm-confirm-delete");
     btn.disabled = true;
@@ -2749,7 +2761,8 @@ function confirmCaptureDelete(kind, projectId, items, owner) {
     toast("Deleted");
     syncCapturesWithOneDrive(); // tell the other devices (best effort)
     render();
-    openCaptureManager(kind, projectId);
+    if (fromRow) closeSheet();
+    else openCaptureManager(kind, projectId);
   });
 }
 
