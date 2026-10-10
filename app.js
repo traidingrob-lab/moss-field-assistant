@@ -298,6 +298,184 @@ function wireNewProjectButton() {
   });
 }
 
+// ---------- Save to OneDrive later (phone first, OneDrive when you choose) ----------
+// By default every new photo / voice note is also sent to OneDrive as it is
+// taken. The Settings switch can turn that off, so everything stays on the
+// phone until "Save to OneDrive now" is tapped. That button sends every
+// photo and voice note that isn't in OneDrive yet (files already there are
+// never overwritten) and a readable data file per project with the issues,
+// materials, inspections and voice-note texts.
+
+const ONEDRIVE_AUTO_KEY = "moss_onedrive_auto";
+const ONEDRIVE_LAST_KEY = "moss_onedrive_last_backup";
+let backupRunning = false;
+
+function oneDriveAutoEnabled() {
+  try {
+    return localStorage.getItem(ONEDRIVE_AUTO_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function lastBackupAt() {
+  try {
+    return localStorage.getItem(ONEDRIVE_LAST_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+// Photos / voice notes on this phone that haven't been confirmed in OneDrive.
+async function pendingBackupItems() {
+  const last = lastBackupAt();
+  const caps = await MossDB.captures.all();
+  return caps.filter(
+    (c) => (c.type === "photo" || c.type === "voice") && c.dataUrl && !c.backedUpAt && (!last || String(c.createdAt || "") > last)
+  );
+}
+
+function backupFileNameFor(c) {
+  if (c.remoteFileName) return c.remoteFileName;
+  const mime = (/^data:([^;,]+)/.exec(c.dataUrl || "") || [])[1] || "";
+  const ext = /png/.test(mime) ? "png" : /webp/.test(mime) ? "webp" : /mp4|m4a|aac/.test(mime) ? "m4a" : /webm/.test(mime) ? "webm" : /ogg/.test(mime) ? "ogg" : c.type === "voice" ? "m4a" : "jpg";
+  return `${c.type}-${String(c.createdAt || Date.now()).replace(/[^0-9]/g, "").slice(0, 14)}-${String(c.id).slice(-6)}.${ext}`;
+}
+
+// Returns { total, uploaded, already, failed, projects, error }.
+async function backupToOneDrive(onProgress = () => {}) {
+  const result = { total: 0, uploaded: 0, already: 0, failed: 0, projects: 0, error: "" };
+  if (!msalConfigured()) {
+    result.error = "OneDrive isn't set up in this app.";
+    return result;
+  }
+  await initMsal();
+  if (!msCurrentAccount()) {
+    result.error = "Connect OneDrive first (Settings ▸ OneDrive ▸ Connect).";
+    return result;
+  }
+  const token = await msGetToken();
+  if (!token) {
+    result.error = "OneDrive needs you to sign in again. Try once more after signing in.";
+    return result;
+  }
+  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
+  const byProject = new Map(projects.map((p) => [p.id, p]));
+  const pending = (await pendingBackupItems()).filter((c) => byProject.has(c.projectId));
+  result.total = pending.length;
+  onProgress({ done: 0, total: pending.length, step: "files" });
+
+  let done = 0;
+  for (const c of pending) {
+    const project = byProject.get(c.projectId);
+    const fileName = backupFileNameFor(c);
+    const sub = syncSubfolderFor(c.type);
+    try {
+      if (await oneDriveFileExists(project.name, sub, fileName, token)) {
+        result.already++; // e.g. sent when it was taken: never replace the original
+      } else {
+        const blob = dataUrlToBlob(c.dataUrl);
+        if (!blob) throw new Error("unreadable file");
+        await uploadToOneDrive(project.name, sub, fileName, blob, token);
+        result.uploaded++;
+      }
+      await MossDB.captures.update(c.id, { backedUpAt: new Date().toISOString(), remoteFileName: fileName });
+      c.remoteFileName = fileName;
+    } catch (err) {
+      console.error("Saving to OneDrive failed for", c.id, err);
+      result.failed++;
+    }
+    done++;
+    onProgress({ done, total: pending.length, step: "files" });
+  }
+
+  // One readable data file per project.
+  onProgress({ done, total: pending.length, step: "data" });
+  const allIssues = await MossDB.issues.all();
+  const allCaps = await MossDB.captures.all();
+  for (const p of projects) {
+    try {
+      const issues = allIssues.filter((i) => i.projectId === p.id);
+      const caps = allCaps.filter((c) => c.projectId === p.id);
+      const light = (c) => {
+        const { dataUrl, ...rest } = c;
+        return rest;
+      };
+      const data = {
+        savedAt: new Date().toISOString(),
+        appVersion: APP_VERSION,
+        project: { id: p.id, name: p.name, address: p.address || "" },
+        issues,
+        materials: caps.filter((c) => c.type === "material").map(light),
+        inspections: caps.filter((c) => c.type === "inspection").map(light),
+        voiceNotes: caps.filter((c) => c.type === "voice").map(light),
+        photos: caps.filter((c) => c.type === "photo").map(light)
+      };
+      await uploadProjectDataFile(p.name, "moss-data.json", JSON.stringify(data, null, 2), token);
+      result.projects++;
+    } catch (err) {
+      console.error("Saving project data to OneDrive failed", p.id, err);
+      result.failed++;
+    }
+  }
+  try {
+    await syncProjectsWithOneDrive();
+    await syncCapturesWithOneDrive();
+  } catch {}
+  if (!result.failed) {
+    try { localStorage.setItem(ONEDRIVE_LAST_KEY, new Date().toISOString()); } catch {}
+  }
+  return result;
+}
+
+function openBackupSheet() {
+  if (backupRunning) {
+    toast("Already saving to OneDrive…");
+    return;
+  }
+  backupRunning = true;
+  const draw = (inner, closable) =>
+    openSheet(`
+    <h2>☁️ Save to OneDrive</h2>
+    ${inner}
+    <div class="sheet-actions"><button class="btn primary" id="bk-close" ${closable ? "" : "disabled"} style="flex:1;">${closable ? "Close" : "Saving…"}</button></div>
+  `);
+  const wireClose = () => document.getElementById("bk-close")?.addEventListener("click", () => { closeSheet(); renderSettings(); });
+  draw(`<p class="empty" style="text-align:left;">Starting…</p>`, false);
+  backupToOneDrive(({ done, total, step }) => {
+    const bar = document.getElementById("bk-bar");
+    const label = document.getElementById("bk-label");
+    if (!bar) {
+      draw(`<div style="height:10px; border-radius:6px; background:#E5E7EB; overflow:hidden;"><div id="bk-bar" style="height:100%; width:0; background:var(--amber-deep, #D97706);"></div></div><p id="bk-label" class="empty" style="text-align:left;"></p>`, false);
+      return;
+    }
+    bar.style.width = (total ? Math.round((done / total) * 100) : 100) + "%";
+    label.textContent = step === "data" ? "Saving the project data files…" : `Sending photos and voice notes… ${done} of ${total}`;
+  })
+    .then((r) => {
+      backupRunning = false;
+      let html;
+      if (r.error) html = `<p class="empty" style="text-align:left;">${escapeHtml(r.error)}</p>`;
+      else {
+        const lines = [];
+        if (r.uploaded) lines.push(`✅ ${r.uploaded} photo${r.uploaded === 1 ? "" : "s"} / voice note${r.uploaded === 1 ? "" : "s"} sent to OneDrive`);
+        if (r.already) lines.push(`✔️ ${r.already} already in OneDrive (not touched)`);
+        if (!r.total) lines.push("Nothing new to send — everything was already saved.");
+        lines.push(`📄 Data file saved for ${r.projects} project${r.projects === 1 ? "" : "s"}`);
+        if (r.failed) lines.push(`⚠️ ${r.failed} could not be saved — check your connection and tap Save now again.`);
+        html = `<div class="card" style="padding:12px 14px; line-height:1.7;">${lines.map(escapeHtml).join("<br>")}</div>`;
+      }
+      draw(html, true);
+      wireClose();
+    })
+    .catch((err) => {
+      backupRunning = false;
+      console.error("Backup failed", err);
+      draw(`<p class="empty" style="text-align:left;">Couldn't save to OneDrive — check your connection and try again.</p>`, true);
+      wireClose();
+    });
+}
+
 // ---------- Cross-device project sync ----------
 // The project list lives in IndexedDB per device (see db.js), but a
 // shared JSON file in OneDrive (graph.js's fetchProjectsIndex/
@@ -1179,7 +1357,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "50"; // matches the sw.js cache number
+const APP_VERSION = "51"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1282,6 +1460,13 @@ async function renderSettings() {
       <div class="project-head"><div class="title" style="font-size:20px;">Settings</div></div>
     </div>
   `;
+  let backupStatusText = "";
+  if (account) {
+    const last = lastBackupAt();
+    let n = 0;
+    try { n = (await pendingBackupItems()).length; } catch {}
+    backupStatusText = (last ? `Last saved ${new Date(last).toLocaleString()}` : "Not saved from this phone yet") + (n ? ` · ${n} new photo/voice note${n === 1 ? "" : "s"} to send` : last ? " · all up to date" : "");
+  }
   const body = `
     <div class="card card-list">
       <div class="row">
@@ -1344,6 +1529,22 @@ async function renderSettings() {
           ).join("")}
         </select>
       </div>
+      ${
+        account
+          ? `<div class="row">
+        <span class="icon">⬆️</span>
+        <span class="main"><span class="title">Save to OneDrive now</span><span class="desc">${backupStatusText}</span></span>
+        <button class="btn primary" style="flex:none; padding:8px 14px; font-size:13px;" id="onedrive-backup">Save now</button>
+      </div>
+      <div class="row">
+        <span class="icon">📲</span>
+        <span class="main"><span class="title">Send to OneDrive automatically</span><span class="desc">${
+          oneDriveAutoEnabled() ? "On — each new photo and voice note goes to OneDrive when it is taken" : "Off — everything stays on this phone until you tap Save now"
+        }</span></span>
+        <input type="checkbox" class="switch" id="f-onedrive-auto" ${oneDriveAutoEnabled() ? "checked" : ""} aria-label="Send to OneDrive automatically">
+      </div>`
+          : ""
+      }
       <div class="row"><span class="icon">💾</span><span class="main"><span class="title">Data storage</span><span class="desc">Stored locally on this device${account ? ", synced to OneDrive" : ""}</span></span></div>
     </div>
   `;
@@ -1356,6 +1557,13 @@ async function renderSettings() {
       else await msSignIn();
     });
   }
+
+  document.getElementById("onedrive-backup")?.addEventListener("click", openBackupSheet);
+  document.getElementById("f-onedrive-auto")?.addEventListener("change", (e) => {
+    try { localStorage.setItem(ONEDRIVE_AUTO_KEY, e.target.checked ? "on" : "off"); } catch {}
+    toast(e.target.checked ? "New photos and voice notes go to OneDrive automatically" : "New photos and voice notes stay on this phone until you tap Save now");
+    renderSettings();
+  });
 
   const $aiKeyInput = document.getElementById("f-ai-key");
   document.getElementById("ai-key-save").addEventListener("click", () => {
@@ -4907,6 +5115,7 @@ function syncSubfolderFor(type) {
 
 async function syncCaptureToOneDrive(projectId, type, blob, fileName) {
   if (!msalConfigured() || !msCurrentAccount()) return; // local-only until connected
+  if (!oneDriveAutoEnabled()) return; // "Save to OneDrive" is set to manual: kept on the phone until the person taps Save now
   try {
     const project = await MossDB.projects.get(projectId);
     if (!project) return;

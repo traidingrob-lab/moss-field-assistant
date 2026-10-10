@@ -300,3 +300,19 @@ async function downloadCaptureFile(projectName, subfolder, fileName, token) {
   const res = await graphFetch(`/me/drive/root:/${encodedPath}:/content`, token);
   return res.blob();
 }
+
+
+// True when a file already exists at this OneDrive path (never throws).
+async function oneDriveFileExists(projectName, subfolder, fileName, token) {
+  return !!(await folderMeta(`${projectFolderPath(projectName)}/${subfolder}/${fileName}`, token));
+}
+
+// Saves a small text file (JSON) into a project's own "MOSS DATA" folder.
+async function uploadProjectDataFile(projectName, fileName, text, token) {
+  const path = `${projectFolderPath(projectName)}/MOSS DATA/${fileName}`;
+  await graphFetch(`/me/drive/root:/${graphPathEncode(path)}:/content`, token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: new Blob([text], { type: "application/json" })
+  });
+}
