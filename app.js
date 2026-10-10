@@ -865,6 +865,7 @@ async function renderDashboard(id) {
             }
             ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
             ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
+            <button class="btn ghost" data-edit-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">✏️ Edit text</button>
             ${v.transcript ? `<button class="btn ghost" data-share-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">💬 Share as text</button>` : ""}
             ${v.transcript && aiConfigured() ? `<button class="btn ghost" data-retr-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">🌐 ${v.translation ? "Translate again" : "Translate"}</button>` : ""}
           </div>`
@@ -935,6 +936,10 @@ async function renderDashboard(id) {
       const issue = issues.find((i) => i.id === el.dataset.issueId);
       if (issue) openIssueDetail(issue, captures);
     });
+  });
+  $app.querySelectorAll("[data-edit-voice]").forEach((el) => {
+    const v = captures.find((c) => c.id === el.dataset.editVoice);
+    if (v) el.addEventListener("click", () => openVoiceEditSheet(v));
   });
   $app.querySelectorAll("[data-share-voice]").forEach((el) => {
     const v = captures.find((c) => c.id === el.dataset.shareVoice);
@@ -1153,7 +1158,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "43"; // matches the sw.js cache number
+const APP_VERSION = "44"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2815,6 +2820,63 @@ function openIssueShareSheet(issue, captures) {
     fallback: `📋 ${issue.title}`,
     files: photoUrls.map((u, i) => ({ url: u, name: `issue-photo-${i + 1}.jpg`, type: "image/jpeg" })),
     noun: "photo"
+  });
+}
+
+// Fix the written version of a voice note. The old translation no longer
+// matches, so it is replaced (made again by the AI when it is set up).
+function openVoiceEditSheet(v) {
+  openSheet(`
+    <h2>Edit voice note text</h2>
+    <div class="field"><label>Written version</label>
+      <textarea id="ve-text" rows="9" style="min-height:220px; line-height:1.5;">${escapeHtml(v.transcript || "")}</textarea>
+    </div>
+    <p class="empty" style="text-align:left; margin-top:-4px;">${aiConfigured() ? "The translation will be made again from your corrected text." : "The old translation will be removed because it no longer matches."}</p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="ve-cancel">Cancel</button>
+      <button class="btn primary" id="ve-save">Save</button>
+    </div>
+  `);
+  document.getElementById("ve-cancel").addEventListener("click", closeSheet);
+  document.getElementById("ve-save").addEventListener("click", async () => {
+    const text = document.getElementById("ve-text").value.trim();
+    const btn = document.getElementById("ve-save");
+    if (!text) {
+      toast("The text can't be empty");
+      return;
+    }
+    if (text === String(v.transcript || "").trim()) {
+      closeSheet();
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    let patch = { transcript: text, translation: "", translationLang: "" };
+    if (aiConfigured()) {
+      try {
+        const tr = await tryTranslate(text, true);
+        if (tr) patch = { transcript: text, translation: tr.translation, translationLang: tr.target };
+      } catch {}
+    }
+    try {
+      await MossDB.captures.update(v.id, patch);
+      Object.assign(v, patch);
+      if (v.issueId) {
+        const issue = (await MossDB.issues.all()).find((i) => i.id === v.issueId);
+        if (issue) await MossDB.issues.add({ ...issue, translation: patch.translation, translationLang: patch.translationLang });
+      }
+      if (v.materialId) await MossDB.captures.update(v.materialId, { translation: patch.translation, translationLang: patch.translationLang });
+    } catch (err) {
+      console.error("Saving the edited voice note failed", err);
+      toast("Couldn't save — try again");
+      btn.disabled = false;
+      btn.textContent = "Save";
+      return;
+    }
+    closeSheet();
+    toast("Voice note text updated");
+    syncCapturesWithOneDrive();
+    render();
   });
 }
 
