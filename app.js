@@ -1179,7 +1179,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "47"; // matches the sw.js cache number
+const APP_VERSION = "48"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2658,7 +2658,7 @@ async function openCapturesPdfSheet(projectId) {
   const hasTr = voices.some((v) => v.translation);
   openSheet(`
     <h2>Captures PDF</h2>
-    <p class="empty" style="text-align:left; margin-top:-4px;">Choose the photos and voice notes for one report. They are put together in the order they were captured. The latest ${CAPTURES_PDF_DEFAULT} of each start ticked.</p>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Choose the photos and voice notes for one report. The photos go four to a sheet, and the voice notes follow on their own pages. The latest ${CAPTURES_PDF_DEFAULT} of each start ticked.</p>
     <div style="display:flex; gap:14px; margin-bottom:6px;">
       <span class="link" id="cp-all" style="cursor:pointer; color:var(--amber-deep); font-weight:600; font-size:13px;">Select all</span>
       <span class="link" id="cp-none" style="cursor:pointer; color:var(--amber-deep); font-weight:600; font-size:13px;">Select none</span>
@@ -2720,11 +2720,19 @@ async function openCapturesPdfSheet(projectId) {
       const nPhotos = items.filter((c) => c.type === "photo").length;
       const nVoice = items.length - nPhotos;
       const blocks = [{ type: "project", name: project.name, meta: project.address || "" }];
-      for (const c of items) {
-        const stamp = c.createdAt ? issueStamp(new Date(c.createdAt)) : "";
-        if (c.type === "photo") {
-          blocks.push({ type: "photo", label: `Photo${stamp ? " - " + stamp : ""}`, photo: c.dataUrl, caption: c.caption || "" });
-        } else {
+      const photoItems = items.filter((c) => c.type === "photo");
+      const voiceItems = items.filter((c) => c.type === "voice");
+      const stampOf = (c) => (c.createdAt ? issueStamp(new Date(c.createdAt)) : "");
+      // Photos first, four to a sheet; the written text (voice notes) is kept apart, after them.
+      if (photoItems.length) {
+        blocks.push({ type: "section", text: `Photos (${photoItems.length})` });
+        blocks.push({ type: "photogrid", items: photoItems.map((c) => ({ photo: c.dataUrl, caption: c.caption || "", stamp: stampOf(c) })) });
+      }
+      if (voiceItems.length) {
+        if (photoItems.length) blocks.push({ type: "pagebreak" });
+        blocks.push({ type: "section", text: `Voice notes (${voiceItems.length})` });
+        for (const c of voiceItems) {
+          const stamp = stampOf(c);
           blocks.push({ type: "label", text: `Voice note${stamp ? " - " + stamp : ""}` });
           blocks.push({ type: "text", text: c.transcript.trim() });
           if (withTr && c.translation) blocks.push({ type: "note", text: `${translationLabel(c.translationLang)}: ${c.translation}` });

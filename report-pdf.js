@@ -894,6 +894,66 @@ async function buildTextReportPdf(report, opts = {}) {
         y += 1.5;
       }
       y += 4;
+    } else if (block.type === "pagebreak") {
+      if (y > M + 1) {
+        doc.addPage();
+        y = M;
+      }
+    } else if (block.type === "section") {
+      ensure(60);
+      y += 6;
+      font("bold", 15);
+      color(INK);
+      doc.text(pdfSafe(block.text), M, y + 13);
+      y += 20;
+      rule([229, 231, 235], 0.6);
+      y += 10;
+    } else if (block.type === "photogrid") {
+      // Four photos to a sheet (2 x 2), each with its date and caption under it.
+      const items = block.items || [];
+      const gap = 14;
+      const cellW = (contentW - gap) / 2;
+      const imgH = 200;
+      const textH = 40;
+      const rowH = imgH + textH + 8;
+      for (let k = 0; k < items.length; k += 2) {
+        ensure(rowH);
+        for (let c = 0; c < 2 && k + c < items.length; c++) {
+          const it = items[k + c];
+          const x = M + c * (cellW + gap);
+          const pr = it.photo ? await prepareImage(it.photo) : null;
+          if (pr) {
+            const sc = Math.min(cellW / pr.width, imgH / pr.height);
+            const w = pr.width * sc;
+            const h = pr.height * sc;
+            doc.addImage(pr.dataUrl, "JPEG", x, y, w, h);
+            doc.setDrawColor(220, 224, 229);
+            doc.setLineWidth(0.5);
+            doc.rect(x, y, w, h);
+          } else {
+            doc.setDrawColor(220, 224, 229);
+            doc.setLineWidth(0.5);
+            doc.rect(x, y, cellW, imgH);
+            font("italic", 9);
+            color(SOFT);
+            doc.text("(couldn't be included)", x + 8, y + 16);
+          }
+          let ty = y + imgH + 11;
+          if (it.stamp) {
+            font("bold", 8.5);
+            color(AMBER);
+            doc.text(pdfSafe(it.stamp), x, ty);
+            ty += 11;
+          }
+          if (it.caption) {
+            font("normal", 9);
+            color(INK);
+            doc.text(doc.splitTextToSize(pdfSafe(it.caption), cellW).slice(0, 2), x, ty);
+          }
+        }
+        y += rowH;
+      }
+      y += 4;
     } else if (block.type === "photo") {
       // One larger photo with its caption underneath.
       const pr = block.photo ? await prepareImage(block.photo) : null;
