@@ -894,6 +894,28 @@ async function buildTextReportPdf(report, opts = {}) {
         y += 1.5;
       }
       y += 4;
+    } else if (block.type === "photo") {
+      // One larger photo with its caption underneath.
+      const pr = block.photo ? await prepareImage(block.photo) : null;
+      if (pr) {
+        const maxW = contentW * 0.8;
+        const maxH = 215;
+        const sc = Math.min(maxW / pr.width, maxH / pr.height);
+        const w = pr.width * sc;
+        const h = pr.height * sc;
+        ensure(h + 24 + (block.label ? 20 : 0)); // label and picture stay together
+        if (block.label) paragraph(pdfSafe(block.label), M, contentW, 10.5, "bold", AMBER, 15);
+        doc.addImage(pr.dataUrl, "JPEG", M, y, w, h);
+        doc.setDrawColor(220, 224, 229);
+        doc.setLineWidth(0.5);
+        doc.rect(M, y, w, h);
+        y += h + 6;
+      } else {
+        if (block.label) paragraph(pdfSafe(block.label), M, contentW, 10.5, "bold", AMBER, 15);
+        paragraph("(This photo couldn't be included in the PDF)", M, contentW, 9, "italic", SOFT, 13);
+      }
+      if (block.caption) paragraph(pdfSafe(block.caption), M, contentW, 10, "normal", INK, 13.5);
+      y += 8;
     } else if (block.type === "photos") {
       const prepared = [];
       for (const d of block.photos || []) {

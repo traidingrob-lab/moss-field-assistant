@@ -806,7 +806,7 @@ async function renderDashboard(id) {
     </div>
 
     <div>
-      <div class="section-label">Recent Captures${photos.length ? `<span><span class="link" data-manage="photo">🗑 Clear</span></span>` : ""}</div>
+      <div class="section-label">Recent Captures${photos.length ? `<span><span class="link" data-captures-pdf="1" style="margin-right:14px;">📄 PDF</span><span class="link" data-manage="photo">🗑 Clear</span></span>` : ""}</div>
       <div class="thumb-grid" style="margin-top:10px;" data-acc="photos" data-acc-total="${photos.length}">
         ${
           photos.length
@@ -847,7 +847,7 @@ async function renderDashboard(id) {
     </div>
 
     <div>
-      <div class="section-label">Voice Notes${captures.some((c) => c.type === "voice") ? `<span><span class="link" data-manage="voice">🗑 Clear</span></span>` : ""}</div>
+      <div class="section-label">Voice Notes${captures.some((c) => c.type === "voice") ? `<span><span class="link" data-captures-pdf="1" style="margin-right:14px;">📄 PDF</span><span class="link" data-manage="voice">🗑 Clear</span></span>` : ""}</div>
       <div class="card card-list" style="margin-top:10px;" data-acc="voice" data-acc-total="${captures.filter((c) => c.type === "voice").length}">
         ${
           captures.filter((c) => c.type === "voice").length
@@ -920,6 +920,9 @@ async function renderDashboard(id) {
       const insp = inspections.find((i) => i.id === el.dataset.inspectionId);
       if (insp) openInspectionDetail(insp, captures);
     });
+  });
+  $app.querySelectorAll("[data-captures-pdf]").forEach((el) => {
+    el.addEventListener("click", () => openCapturesPdfSheet(id));
   });
   $app.querySelectorAll("[data-manage]").forEach((el) => {
     el.addEventListener("click", () => openCaptureManager(el.dataset.manage, id));
@@ -1176,7 +1179,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "46"; // matches the sw.js cache number
+const APP_VERSION = "47"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2631,6 +2634,115 @@ function confirmDrawerDelete(kind, projectId, items) {
     syncCapturesWithOneDrive(); // tell the other devices (best effort)
     render();
     openDrawerSheet(kind, projectId);
+  });
+}
+
+// ---------- Captures PDF: photos + voice notes together in one report ----------
+
+const CAPTURES_PDF_DEFAULT = 10; // how many of each start ticked
+
+async function openCapturesPdfSheet(projectId) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  const project = await MossDB.projects.get(projectId);
+  const caps = await MossDB.captures.forProject(projectId);
+  const byNewest = (a, b) => String(b.createdAt).localeCompare(String(a.createdAt));
+  const photos = caps.filter((c) => c.type === "photo" && c.dataUrl).sort(byNewest);
+  const voices = caps.filter((c) => c.type === "voice" && String(c.transcript || "").trim()).sort(byNewest);
+  if (!project || (!photos.length && !voices.length)) {
+    toast("No photos or voice notes to put in a PDF yet");
+    return;
+  }
+  const hasTr = voices.some((v) => v.translation);
+  openSheet(`
+    <h2>Captures PDF</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Choose the photos and voice notes for one report. They are put together in the order they were captured. The latest ${CAPTURES_PDF_DEFAULT} of each start ticked.</p>
+    <div style="display:flex; gap:14px; margin-bottom:6px;">
+      <span class="link" id="cp-all" style="cursor:pointer; color:var(--amber-deep); font-weight:600; font-size:13px;">Select all</span>
+      <span class="link" id="cp-none" style="cursor:pointer; color:var(--amber-deep); font-weight:600; font-size:13px;">Select none</span>
+    </div>
+    ${
+      photos.length
+        ? `<div class="section-label">Photos (${photos.length})</div>
+    <div class="card card-list">${photos
+      .map(
+        (p, i) => `
+      <label class="row" style="cursor:pointer; gap:12px;">
+        <input type="checkbox" data-cid="${escapeHtml(p.id)}" ${i < CAPTURES_PDF_DEFAULT ? "checked" : ""} style="width:20px; height:20px; flex:none;">
+        <img src="${p.dataUrl}" alt="" style="width:48px; height:48px; object-fit:cover; border-radius:8px; flex:none;">
+        <span class="main"><span class="title">${escapeHtml(p.caption || "Photo")}</span><span class="desc">${escapeHtml(new Date(p.createdAt).toLocaleString())}</span></span>
+      </label>`
+      )
+      .join("")}</div>`
+        : ""
+    }
+    ${
+      voices.length
+        ? `<div class="section-label">Voice notes (${voices.length})</div>
+    <div class="card card-list">${voices
+      .map(
+        (v, i) => `
+      <label class="row" style="cursor:pointer; gap:12px;">
+        <input type="checkbox" data-cid="${escapeHtml(v.id)}" ${i < CAPTURES_PDF_DEFAULT ? "checked" : ""} style="width:20px; height:20px; flex:none;">
+        <span class="icon">🎤</span>
+        <span class="main"><span class="title">${escapeHtml(v.transcript.slice(0, 70))}</span><span class="desc">${escapeHtml(new Date(v.createdAt).toLocaleString())}</span></span>
+      </label>`
+      )
+      .join("")}</div>`
+        : ""
+    }
+    ${hasTr ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="cp-tr" checked style="width:20px; height:20px;"> Include the translation of each voice note</label>` : ""}
+    <div class="sheet-actions">
+      <button class="btn ghost" id="cp-cancel">Cancel</button>
+      <button class="btn primary" id="cp-create">Create PDF</button>
+    </div>
+  `);
+  const boxes = () => [...$sheet.querySelectorAll("[data-cid]")];
+  document.getElementById("cp-cancel").addEventListener("click", closeSheet);
+  document.getElementById("cp-all").addEventListener("click", () => boxes().forEach((b) => (b.checked = true)));
+  document.getElementById("cp-none").addEventListener("click", () => boxes().forEach((b) => (b.checked = false)));
+  document.getElementById("cp-create").addEventListener("click", async () => {
+    const chosen = new Set(boxes().filter((b) => b.checked).map((b) => b.dataset.cid));
+    if (!chosen.size) {
+      toast("Select at least one photo or voice note");
+      return;
+    }
+    const withTr = !!document.getElementById("cp-tr")?.checked;
+    const btn = document.getElementById("cp-create");
+    btn.disabled = true;
+    btn.textContent = "Building PDF…";
+    try {
+      const items = [...photos, ...voices]
+        .filter((c) => chosen.has(c.id))
+        .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+      const nPhotos = items.filter((c) => c.type === "photo").length;
+      const nVoice = items.length - nPhotos;
+      const blocks = [{ type: "project", name: project.name, meta: project.address || "" }];
+      for (const c of items) {
+        const stamp = c.createdAt ? issueStamp(new Date(c.createdAt)) : "";
+        if (c.type === "photo") {
+          blocks.push({ type: "photo", label: `Photo${stamp ? " - " + stamp : ""}`, photo: c.dataUrl, caption: c.caption || "" });
+        } else {
+          blocks.push({ type: "label", text: `Voice note${stamp ? " - " + stamp : ""}` });
+          blocks.push({ type: "text", text: c.transcript.trim() });
+          if (withTr && c.translation) blocks.push({ type: "note", text: `${translationLabel(c.translationLang)}: ${c.translation}` });
+        }
+      }
+      const parts = [];
+      if (nPhotos) parts.push(`${nPhotos} photo${nPhotos === 1 ? "" : "s"}`);
+      if (nVoice) parts.push(`${nVoice} voice note${nVoice === 1 ? "" : "s"}`);
+      const report = { title: "Field Captures Report", subtitle: `${new Date().toLocaleDateString()}  -  ${parts.join(", ")}`, blocks };
+      const blob = await buildTextReportPdf(report);
+      const day = new Date().toISOString().slice(0, 10);
+      showPdfReady(blob, `Captures - ${project.name} - ${day}.pdf`.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " "), items.length, "capture");
+    } catch (err) {
+      console.error("Captures PDF failed", err);
+      toast("Couldn't build the PDF — try again");
+      btn.disabled = false;
+      btn.textContent = "Create PDF";
+    }
   });
 }
 
