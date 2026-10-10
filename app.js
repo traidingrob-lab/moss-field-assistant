@@ -246,8 +246,6 @@ async function renderHome() {
         <button class="row" data-action="ask"><span class="icon">🤖</span><span class="main"><span class="title">Ask AI</span></span><span class="chev">›</span></button>
         <button class="row" data-action="open-issues"><span class="icon">📋</span><span class="main"><span class="title">Open Issues</span></span><span class="badge">${openCount}</span></button>
         <button class="row" data-action="next-steps"><span class="icon">➡️</span><span class="main"><span class="title">Next Steps</span></span><span class="chev">›</span></button>
-        <button class="row" data-action="daily-report"><span class="icon">📝</span><span class="main"><span class="title">Daily Report</span></span><span class="chev">›</span></button>
-        <button class="row" data-action="weekly-report"><span class="icon">📊</span><span class="main"><span class="title">Weekly Report</span></span><span class="chev">›</span></button>
       </div>
     </div>
 
@@ -784,8 +782,6 @@ function wireHomeActions(allIssues) {
       if (action === "ask") location.hash = "#/ask";
       else if (action === "open-issues") location.hash = "#/issues";
       else if (action === "next-steps") showNextSteps();
-      else if (action === "daily-report") showDailyReport();
-      else if (action === "weekly-report") showWeeklyReport();
     });
   });
 }
@@ -825,6 +821,52 @@ async function renderProjectsList() {
   `;
   shell({ header, body, activeTab: "projects" });
   wireNewProjectButton();
+}
+
+// ---------- Project menu: open / close each list ----------
+const SECTIONS_KEY = "moss_dash_sections";
+const SECTION_DEFAULTS = { completed: false, issues: true, inspections: true, materials: true };
+
+function secOpen(name) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SECTIONS_KEY) || "{}");
+    if (typeof saved[name] === "boolean") return saved[name];
+  } catch {}
+  return SECTION_DEFAULTS[name] !== false;
+}
+
+function setSecOpen(name, open) {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SECTIONS_KEY) || "{}") || {}; } catch {}
+  saved[name] = open;
+  try { localStorage.setItem(SECTIONS_KEY, JSON.stringify(saved)); } catch {}
+}
+
+function wireSectionToggles() {
+  const apply = (name, open) => {
+    setSecOpen(name, open);
+    $app.querySelector(`[data-sec="${name}"]`)?.classList.toggle("sec-collapsed", !open);
+    const tile = $app.querySelector(`[data-sec-toggle="${name}"]`);
+    if (tile) {
+      tile.classList.toggle("on", open);
+      tile.setAttribute("aria-expanded", String(open));
+    }
+  };
+  $app.querySelectorAll("[data-sec-toggle]").forEach((t) =>
+    t.addEventListener("click", () => {
+      const name = t.dataset.secToggle;
+      const open = !secOpen(name);
+      apply(name, open);
+      if (open) $app.querySelector(`[data-sec="${name}"]`)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    })
+  );
+  // The section titles open/close their own list too (but not the PDF / Add links).
+  $app.querySelectorAll("[data-sec-head]").forEach((h) =>
+    h.addEventListener("click", (e) => {
+      if (e.target.closest(".link")) return;
+      apply(h.dataset.secHead, !secOpen(h.dataset.secHead));
+    })
+  );
 }
 
 // ---------- Project dashboard ----------
@@ -888,14 +930,19 @@ async function renderDashboard(id) {
   `;
 
   const body = `
-    <div class="stat-grid">
-      <div class="stat-tile"><span class="num" style="color:var(--green);">${issues.filter((i) => i.status === "Completed").length}</span><span class="label">COMPLETED</span></div>
-      <div class="stat-tile warn"><span class="num" style="color:var(--amber-deep);">${openIssues.length}</span><span class="label">OPEN ISSUES</span></div>
-      <div class="stat-tile"><span class="num">${issues.filter((i) => i.status === "Waiting").length}</span><span class="label">WAITING</span></div>
-      <div class="stat-tile"><span class="num">${captures.filter((c) => c.type === "inspection").length}</span><span class="label">INSPECTIONS</span></div>
-      <div class="stat-tile"><span class="num">${materials.length}</span><span class="label">MATERIALS</span></div>
-      <div class="stat-tile"><span class="num">${new Set(openIssues.map((i) => i.trade)).size}</span><span class="label">TRADES ON OPEN</span></div>
+    <div class="stat-grid stat-grid-4">
+      <button class="stat-tile ${secOpen("completed") ? "on" : ""}" data-sec-toggle="completed" aria-expanded="${secOpen("completed")}"><span class="num" style="color:var(--green);">${issues.filter((i) => i.status === "Completed").length}</span><span class="label">COMPLETED</span></button>
+      <button class="stat-tile warn ${secOpen("issues") ? "on" : ""}" data-sec-toggle="issues" aria-expanded="${secOpen("issues")}"><span class="num" style="color:var(--amber-deep);">${openIssues.length}</span><span class="label">OPEN ISSUES</span></button>
+      <button class="stat-tile ${secOpen("inspections") ? "on" : ""}" data-sec-toggle="inspections" aria-expanded="${secOpen("inspections")}"><span class="num">${captures.filter((c) => c.type === "inspection").length}</span><span class="label">INSPECTIONS</span></button>
+      <button class="stat-tile ${secOpen("materials") ? "on" : ""}" data-sec-toggle="materials" aria-expanded="${secOpen("materials")}"><span class="num">${materials.length}</span><span class="label">MATERIALS</span></button>
     </div>
+    <p class="empty" style="text-align:left; margin:-12px 0 -6px; font-size:11px;">Tap a number to open or close its list.</p>
+
+    <button class="card" id="weekly-summary-btn" style="width:100%; border:none; padding:14px 16px; display:flex; align-items:center; gap:12px; text-align:left; cursor:pointer; font:inherit; color:inherit;">
+      <span class="icon" style="font-size:20px;">📅</span>
+      <span class="main" style="flex:1; display:flex; flex-direction:column; gap:2px;"><span class="title" style="font-size:14px; font-weight:600;">Weekly Summary</span><span class="desc" style="font-size:12px; color:var(--ink-soft);">The week's photos, voice notes and activity as a PDF</span></span>
+      <span class="chev" style="color:var(--ink-faint);">›</span>
+    </button>
 
     <div>
       <div class="section-label">Quick Capture</div>
@@ -909,8 +956,8 @@ async function renderDashboard(id) {
       </div>
     </div>
 
-    <div>
-      <div class="section-label">Open Issues<span><span class="link" data-quick="issue-pdf">📄 PDF</span><span class="link" data-quick="issue" style="margin-left:14px;">+ Add</span></span></div>
+    <div data-sec="issues" class="${secOpen("issues") ? "" : "sec-collapsed"}">
+      <div class="section-label" data-sec-head="issues">Open Issues<span><span class="link" data-quick="issue-pdf">📄 PDF</span><span class="link" data-quick="issue" style="margin-left:14px;">+ Add</span></span></div>
       <div class="card card-list" style="margin-top:10px;" data-acc="issues" data-acc-total="${openIssues.length}">
         ${
           openIssues.length
@@ -934,8 +981,30 @@ async function renderDashboard(id) {
       </div>
     </div>
 
-    <div>
-      <div class="section-label">Materials<span><span class="link" data-quick="material-pdf">📄 PDF</span><span class="link" data-quick="material" style="margin-left:14px;">+ Add</span></span></div>
+    <div data-sec="completed" class="${secOpen("completed") ? "" : "sec-collapsed"}">
+      <div class="section-label" data-sec-head="completed">Completed</div>
+      <div class="card card-list" style="margin-top:10px;">
+        ${
+          issues.filter((i) => i.status === "Completed").length
+            ? issues
+                .filter((i) => i.status === "Completed")
+                .sort((a, b) => String(b.archivedAt || b.createdAt || "").localeCompare(String(a.archivedAt || a.createdAt || "")))
+                .map(
+                  (i) => `
+          <div class="row" data-issue-id="${escapeHtml(i.id)}" style="cursor:pointer;">
+            <span class="icon" style="color:var(--green);">✔</span>
+            <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(i.trade)}${i.archivedAt ? " · fixed " + escapeHtml(new Date(i.archivedAt).toLocaleDateString()) : ""}</span></span>
+            <span class="chev">›</span>
+          </div>`
+                )
+                .join("")
+            : `<div class="row"><span class="empty">Nothing fixed yet.</span></div>`
+        }
+      </div>
+    </div>
+
+    <div data-sec="materials" class="${secOpen("materials") ? "" : "sec-collapsed"}">
+      <div class="section-label" data-sec-head="materials">Materials<span><span class="link" data-quick="material-pdf">📄 PDF</span><span class="link" data-quick="material" style="margin-left:14px;">+ Add</span></span></div>
       <div class="card card-list" style="margin-top:10px;" data-acc="materials" data-acc-total="${materials.length}">
         ${
           materials.length
@@ -961,8 +1030,8 @@ async function renderDashboard(id) {
       </div>
     </div>
 
-    <div>
-      <div class="section-label">Inspections<span><span class="link" data-quick="inspection-pdf">📄 PDF</span><span class="link" data-quick="inspection" style="margin-left:14px;">+ Add</span></span></div>
+    <div data-sec="inspections" class="${secOpen("inspections") ? "" : "sec-collapsed"}">
+      <div class="section-label" data-sec-head="inspections">Inspections<span><span class="link" data-quick="inspection-pdf">📄 PDF</span><span class="link" data-quick="inspection" style="margin-left:14px;">+ Add</span></span></div>
       <div class="card card-list" style="margin-top:10px;" data-acc="inspections" data-acc-total="${inspections.length}">
         ${
           inspections.length
@@ -1085,6 +1154,8 @@ async function renderDashboard(id) {
 
   shell({ header, body, activeTab: "projects" });
   applyDashboardAccordions();
+  wireSectionToggles();
+  document.getElementById("weekly-summary-btn").addEventListener("click", () => openWeeklySummarySheet(id));
 
   wireQuickCapture();
   $app.querySelector('[data-quick="issue"]').addEventListener("click", () => openIssueSheet(id));
@@ -1188,7 +1259,7 @@ async function renderDashboard(id) {
           (l) => `<div class="row"><span class="icon">📝</span><span class="main"><span class="title">${escapeHtml(new Date(l.createdAt).toLocaleDateString())}</span><span class="desc">${escapeHtml(l.summary || "")}</span></span></div>`
         )
         .join("")
-    : `<div class="row"><span class="empty">No daily logs yet — run "Daily Report" from Home to log today.</span></div>`;
+    : `<div class="row"><span class="empty">No daily logs yet.</span></div>`;
 }
 
 // ---------- Open issues (all projects) ----------
@@ -1357,7 +1428,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "51"; // matches the sw.js cache number
+const APP_VERSION = "52"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2846,6 +2917,28 @@ function confirmDrawerDelete(kind, projectId, items) {
   });
 }
 
+// Blocks for a report: photos first (four to a sheet), then the written
+// text of the voice notes on their own page(s).
+function captureReportBlocks(photoItems, voiceItems, withTr) {
+  const blocks = [];
+  const stampOf = (c) => (c.createdAt ? issueStamp(new Date(c.createdAt)) : "");
+  if (photoItems.length) {
+    blocks.push({ type: "section", text: `Photos (${photoItems.length})` });
+    blocks.push({ type: "photogrid", items: photoItems.map((c) => ({ photo: c.dataUrl, caption: c.caption || "", stamp: stampOf(c) })) });
+  }
+  if (voiceItems.length) {
+    if (photoItems.length) blocks.push({ type: "pagebreak" });
+    blocks.push({ type: "section", text: `Voice notes (${voiceItems.length})` });
+    for (const c of voiceItems) {
+      const stamp = stampOf(c);
+      blocks.push({ type: "label", text: `Voice note${stamp ? " - " + stamp : ""}` });
+      blocks.push({ type: "text", text: String(c.transcript || "").trim(), lang: c.translationLang === "en" ? "es" : c.translationLang === "es" ? "en" : "" });
+      if (withTr && c.translation) blocks.push({ type: "translation", label: translationLabel(c.translationLang), text: c.translation, lang: c.translationLang });
+    }
+  }
+  return blocks;
+}
+
 // ---------- Captures PDF: photos + voice notes together in one report ----------
 
 const CAPTURES_PDF_DEFAULT = 10; // how many of each start ticked
@@ -2928,25 +3021,7 @@ async function openCapturesPdfSheet(projectId) {
         .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
       const nPhotos = items.filter((c) => c.type === "photo").length;
       const nVoice = items.length - nPhotos;
-      const blocks = [{ type: "project", name: project.name, meta: project.address || "" }];
-      const photoItems = items.filter((c) => c.type === "photo");
-      const voiceItems = items.filter((c) => c.type === "voice");
-      const stampOf = (c) => (c.createdAt ? issueStamp(new Date(c.createdAt)) : "");
-      // Photos first, four to a sheet; the written text (voice notes) is kept apart, after them.
-      if (photoItems.length) {
-        blocks.push({ type: "section", text: `Photos (${photoItems.length})` });
-        blocks.push({ type: "photogrid", items: photoItems.map((c) => ({ photo: c.dataUrl, caption: c.caption || "", stamp: stampOf(c) })) });
-      }
-      if (voiceItems.length) {
-        if (photoItems.length) blocks.push({ type: "pagebreak" });
-        blocks.push({ type: "section", text: `Voice notes (${voiceItems.length})` });
-        for (const c of voiceItems) {
-          const stamp = stampOf(c);
-          blocks.push({ type: "label", text: `Voice note${stamp ? " - " + stamp : ""}` });
-          blocks.push({ type: "text", text: c.transcript.trim(), lang: c.translationLang === "en" ? "es" : c.translationLang === "es" ? "en" : "" });
-          if (withTr && c.translation) blocks.push({ type: "translation", label: translationLabel(c.translationLang), text: c.translation, lang: c.translationLang });
-        }
-      }
+      const blocks = [{ type: "project", name: project.name, meta: project.address || "" }, ...captureReportBlocks(items.filter((c) => c.type === "photo"), items.filter((c) => c.type === "voice"), withTr)];
       const parts = [];
       if (nPhotos) parts.push(`${nPhotos} photo${nPhotos === 1 ? "" : "s"}`);
       if (nVoice) parts.push(`${nVoice} voice note${nVoice === 1 ? "" : "s"}`);
@@ -2961,6 +3036,160 @@ async function openCapturesPdfSheet(projectId) {
       btn.textContent = "Create PDF";
     }
   });
+}
+
+// ---------- Weekly Summary (per project): the week's photos, voice notes and activity ----------
+
+async function openWeeklySummarySheet(projectId) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  const project = await MossDB.projects.get(projectId);
+  if (!project) return;
+  const state = { offset: 0, tr: true, ai: aiConfigured() };
+
+  // A week runs Monday to Sunday; offset 0 is this week, -1 last week, ...
+  const weekRange = (off) => {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7) + off * 7);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 7);
+    return { start, end };
+  };
+  const rangeText = (start, end) => {
+    const last = new Date(end.getTime() - 86400000);
+    const f = (d) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return `${f(start)} - ${f(last)}, ${last.getFullYear()}`;
+  };
+  const gather = async (start, end) => {
+    const inRange = (v) => {
+      const d = new Date(v || 0);
+      return d >= start && d < end;
+    };
+    const [issues, caps] = await Promise.all([MossDB.issues.forProject(projectId), MossDB.captures.forProject(projectId)]);
+    const byTime = (a, b) => String(a.createdAt || a.recordedAt || "").localeCompare(String(b.createdAt || b.recordedAt || ""));
+    return {
+      newIssues: issues.filter((i) => inRange(i.recordedAt || i.createdAt)),
+      fixed: issues.filter((i) => i.status === "Completed" && i.archivedAt && inRange(i.archivedAt)),
+      inspections: caps.filter((c) => c.type === "inspection" && inRange(c.recordedAt || c.createdAt)),
+      materials: caps.filter((c) => c.type === "material" && inRange(c.createdAt)),
+      photos: caps.filter((c) => c.type === "photo" && c.dataUrl && inRange(c.createdAt)).sort(byTime),
+      voices: caps.filter((c) => c.type === "voice" && String(c.transcript || "").trim() && inRange(c.createdAt)).sort(byTime)
+    };
+  };
+
+  const draw = async () => {
+    const { start, end } = weekRange(state.offset);
+    const d = await gather(start, end);
+    const empty = !d.photos.length && !d.voices.length && !d.newIssues.length && !d.fixed.length && !d.inspections.length && !d.materials.length;
+    const hasTr = d.voices.some((v) => v.translation);
+    openSheet(`
+      <h2>📅 Weekly Summary</h2>
+      <div style="display:flex; align-items:center; gap:8px;">
+        <button class="btn ghost" id="wk-prev" style="flex:none; padding:8px 14px;">‹</button>
+        <div style="flex:1; text-align:center; font-weight:600; font-size:14px;">${escapeHtml(rangeText(start, end))}${state.offset === 0 ? '<br><span class="desc">this week</span>' : ""}</div>
+        <button class="btn ghost" id="wk-next" style="flex:none; padding:8px 14px;" ${state.offset >= 0 ? "disabled" : ""}>›</button>
+      </div>
+      <div class="card" style="padding:12px 14px; line-height:1.8; font-size:14px;">
+        📷 ${d.photos.length} photo${d.photos.length === 1 ? "" : "s"} · 🎤 ${d.voices.length} voice note${d.voices.length === 1 ? "" : "s"}<br>
+        📋 ${d.newIssues.length} new issue${d.newIssues.length === 1 ? "" : "s"} · ✔ ${d.fixed.length} fixed<br>
+        🏛️ ${d.inspections.length} inspection${d.inspections.length === 1 ? "" : "s"} · 📦 ${d.materials.length} material${d.materials.length === 1 ? "" : "s"} added
+      </div>
+      ${empty ? `<p class="empty" style="text-align:left;">Nothing was recorded this week.</p>` : ""}
+      ${hasTr ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="wk-tr" ${state.tr ? "checked" : ""} style="width:20px; height:20px;"> Include the translation of each voice note</label>` : ""}
+      ${
+        aiConfigured()
+          ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="wk-ai" ${state.ai ? "checked" : ""} style="width:20px; height:20px;"> Write a short summary with AI (Español + English)</label>`
+          : `<p class="empty" style="text-align:left;">Add a Claude API key in Settings to get a written summary at the top.</p>`
+      }
+      <div class="sheet-actions">
+        <button class="btn ghost" id="wk-cancel">Cancel</button>
+        <button class="btn primary" id="wk-create" ${empty ? "disabled" : ""}>Create PDF</button>
+      </div>
+    `);
+    document.getElementById("wk-cancel").addEventListener("click", closeSheet);
+    const keep = () => {
+      state.tr = document.getElementById("wk-tr")?.checked ?? state.tr;
+      state.ai = document.getElementById("wk-ai")?.checked ?? state.ai;
+    };
+    document.getElementById("wk-prev").addEventListener("click", () => {
+      keep();
+      state.offset--;
+      draw();
+    });
+    document.getElementById("wk-next").addEventListener("click", () => {
+      keep();
+      if (state.offset < 0) state.offset++;
+      draw();
+    });
+    document.getElementById("wk-create").addEventListener("click", async () => {
+      keep();
+      const btn = document.getElementById("wk-create");
+      btn.disabled = true;
+      btn.textContent = "Building PDF…";
+      try {
+        const range = rangeText(start, end);
+        const blocks = [{ type: "project", name: project.name, meta: project.address || "" }];
+
+        const factLines = [];
+        const addList = (label, items, fmt) => {
+          if (items.length) factLines.push({ label: `${label} (${items.length})`, items: items.map(fmt) });
+        };
+        addList("New issues", d.newIssues, issueBullet);
+        addList("Fixed this week", d.fixed, (i) => `[${i.trade || "General"}] ${i.title}`);
+        addList("Inspections", d.inspections, inspectionBullet);
+        addList("Materials added", d.materials, (m) => `${m.name}${m.quantity ? " x " + m.quantity : ""}${m.dimensions ? " (" + m.dimensions + ")" : ""}`);
+
+        if (state.ai && aiConfigured()) {
+          btn.textContent = "Writing the summary…";
+          try {
+            const data = [
+              ...factLines.map((f) => `${f.label}:\n- ${f.items.join("\n- ")}`),
+              d.voices.length ? `Voice notes:\n- ${d.voices.slice(0, 15).map((v) => clip(v.transcript, 400)).join("\n- ")}` : ""
+            ]
+              .filter(Boolean)
+              .join("\n\n");
+            const reply = await withTimeout(
+              askClaude(
+                `You are a general contractor's assistant. Write a short weekly summary (4 to 7 sentences) for the project "${project.name}" for the week ${range}, ` +
+                  `using ONLY the data below: what was done, what is still open or needs attention, and a brief note on what is likely next. ` +
+                  `Reply with ONLY a JSON object {"es":"<the summary in Spanish>","en":"<the same summary in English>"} and nothing else.\n\n${data || "No recorded activity."}`
+              ),
+              45000,
+              "it took too long"
+            );
+            const m = /\{[\s\S]*\}/.exec(reply || "");
+            const parsed = m ? JSON.parse(m[0]) : null;
+            if (parsed && typeof parsed.es === "string" && typeof parsed.en === "string") {
+              blocks.push({ type: "section", text: "Resumen / Summary" });
+              blocks.push({ type: "text", text: parsed.es.trim(), lang: "es" });
+              blocks.push({ type: "text", text: parsed.en.trim(), lang: "en" });
+            } else toast("The AI summary wasn't readable — the PDF goes without it");
+          } catch (err) {
+            console.error("Weekly AI summary failed", err);
+            toast("Couldn't write the AI summary — the PDF goes without it");
+          }
+        }
+        if (factLines.length) {
+          blocks.push({ type: "section", text: "Activity this week" });
+          for (const f of factLines) blocks.push({ type: "label", text: f.label }, { type: "bullets", items: f.items });
+        }
+        if (blocks.length > 1 && d.photos.length) blocks.push({ type: "pagebreak" }); // photos start on a fresh sheet: four per page
+        blocks.push(...captureReportBlocks(d.photos, d.voices, state.tr));
+        const blob = await buildTextReportPdf({ title: "Weekly Summary", subtitle: `${project.name}  -  ${range}`, blocks });
+        const fileName = `Weekly Summary - ${project.name} - ${start.toISOString().slice(0, 10)}.pdf`.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ");
+        showPdfReady(blob, fileName, 1, "report");
+      } catch (err) {
+        console.error("Weekly summary PDF failed", err);
+        toast("Couldn't build the PDF — try again");
+        btn.disabled = false;
+        btn.textContent = "Create PDF";
+      }
+    });
+  };
+  draw();
 }
 
 // ---------- Clear photos / voice notes ----------
@@ -4883,147 +5112,6 @@ async function showNextSteps() {
   `);
   wireCloseButton();
   wireReportPdf(report, `Next Steps - ${now.toISOString().slice(0, 10)}`);
-}
-
-async function showDailyReport() {
-  const projects = (await MossDB.projects.all()).filter(isVisibleProject);
-  const today = new Date().toDateString();
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const activity = await gatherActivity(startOfDay);
-  let lines = [];
-  for (const p of projects) {
-    const issues = await MossDB.issues.forProject(p.id);
-    const captures = await MossDB.captures.forProject(p.id);
-    const todays = captures.filter((c) => new Date(c.createdAt).toDateString() === today);
-    const todaysIssues = issues.filter((i) => new Date(i.createdAt).toDateString() === today);
-    if (todays.length || todaysIssues.length) {
-      const summary = `${todaysIssues.length} new issue(s), ${todays.length} capture(s) today.`;
-      lines.push(`<strong>${escapeHtml(p.name)}</strong>: ${summary}`);
-      // One log entry per project per day — re-opening the report later
-      // the same day (after more captures) updates that same entry's
-      // count instead of piling up duplicate rows, which used to inflate
-      // both the Daily Logs list and the AI context sent to Ask AI.
-      const existingLogs = await MossDB.logs.forProject(p.id);
-      const todaysLog = existingLogs.find((l) => new Date(l.createdAt).toDateString() === today);
-      if (todaysLog) {
-        await MossDB.logs.update(todaysLog.id, { summary });
-      } else {
-        await MossDB.logs.add({ projectId: p.id, summary });
-      }
-    }
-  }
-
-  let narrative = "";
-  if (aiConfigured() && lines.length) {
-    try {
-      const context = await buildAIContext();
-      narrative = await askClaude(
-        `You are writing today's daily log narrative for a general contractor, using ONLY the project ` +
-        `data below. Write 2-4 short plain-professional sentences for each project that had activity ` +
-        `today (today is ${today}) — only mention projects with today's date in their captures/issues/logs.\n\n${context}`
-      );
-    } catch (err) {
-      narrative = `⚠️ ${err.message}`;
-    }
-  }
-
-  // The PDF: summary, then for each project what was logged today.
-  const blocks = [];
-  if (narrative && !narrative.startsWith("⚠️")) blocks.push({ type: "label", text: "Summary" }, { type: "text", text: narrative });
-  let any = false;
-  for (const a of activity) {
-    const hasStuff = a.newIssues.length || a.inspections.length || a.materials.length || a.voices.length || a.photos.length;
-    if (!hasStuff) continue;
-    any = true;
-    blocks.push({ type: "project", name: a.project.name, meta: a.project.address || "" });
-    if (a.newIssues.length) blocks.push({ type: "label", text: `New issues (${a.newIssues.length})` }, { type: "bullets", items: a.newIssues.map(issueBullet) });
-    if (a.inspections.length) blocks.push({ type: "label", text: `Inspections (${a.inspections.length})` }, { type: "bullets", items: a.inspections.map(inspectionBullet) });
-    if (a.materials.length) blocks.push({ type: "label", text: `Materials added (${a.materials.length})` }, { type: "bullets", items: a.materials.map((m) => `${m.name}${m.quantity ? " x " + m.quantity : ""}${m.dimensions ? " (" + m.dimensions + ")" : ""}`) });
-    const spoken = a.voices.filter((v) => v.transcript);
-    if (spoken.length) {
-      blocks.push({ type: "label", text: `Voice notes (${a.voices.length})` });
-      blocks.push({ type: "bullets", items: spoken.slice(0, 8).map((v) => clip(v.transcript, 500) + (v.translation ? `  [${translationLabel(v.translationLang)}: ${clip(v.translation, 500)}]` : "")) });
-    }
-    if (a.photos.length) {
-      blocks.push({ type: "label", text: `Photos (${a.photos.length})` }, { type: "photos", photos: a.photos.slice(-9).map((p) => p.dataUrl) });
-      if (a.photos.length > 9) blocks.push({ type: "note", text: `Showing the latest 9 of ${a.photos.length} photos.` });
-    }
-  }
-  if (!any) blocks.push({ type: "text", text: "Nothing captured yet today." });
-  const report = { title: "Daily Report", subtitle: reportDay(new Date()), blocks };
-
-  openSheet(`
-    <h2>Today's Daily Log</h2>
-    <div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">
-      ${narrative ? escapeHtml(narrative) : (lines.length ? lines.join("<br>") : "Nothing captured yet today.")}
-    </div>
-    <p class="empty">${
-      !aiConfigured()
-        ? "Add a Claude API key in Settings for a written narrative log."
-        : lines.length
-        ? "Saved to each project's Daily Logs."
-        : ""
-    }</p>
-    ${reportPdfButton()}
-    ${closeButton()}
-  `);
-  wireCloseButton();
-  wireReportPdf(report, `Daily Report - ${new Date().toISOString().slice(0, 10)}`);
-  if (currentRoute().name === "project" && lines.length) render();
-}
-
-async function showWeeklyReport() {
-  const now = new Date();
-  const since = new Date(now.getTime() - 7 * 86400000);
-  const activity = await gatherActivity(since);
-  let narrative = "";
-  if (aiConfigured()) {
-    try {
-      const context = await buildAIContext();
-      narrative = await askClaude(
-        `You are writing a weekly report for a general contractor, using ONLY the project data below ` +
-        `(issues, logs, and captures on file). For each active project, summarize: completed/recent ` +
-        `work, open issues or inspections, and a brief note on what's likely next. Be concise and ` +
-        `professional, plain text, no markdown headers.\n\n${context}`
-      );
-    } catch (err) {
-      narrative = `⚠️ ${err.message}`;
-    }
-  }
-
-  const range = `${since.toLocaleDateString()} - ${now.toLocaleDateString()}`;
-  const blocks = [];
-  if (narrative && !narrative.startsWith("⚠️")) blocks.push({ type: "label", text: "Summary" }, { type: "text", text: narrative });
-  const factLines = [];
-  for (const a of activity) {
-    const stats = `New issues: ${a.newIssues.length}  |  Fixed: ${a.fixedIssues.length}  |  Open now: ${a.openIssues.length}  |  Inspections: ${a.inspections.length}  |  Materials added: ${a.materials.length}  |  Photos: ${a.photos.length}`;
-    const quiet = !a.newIssues.length && !a.fixedIssues.length && !a.openIssues.length && !a.inspections.length && !a.materials.length && !a.photos.length;
-    if (quiet) continue;
-    factLines.push(`${a.project.name}: ${a.newIssues.length} new, ${a.fixedIssues.length} fixed, ${a.openIssues.length} open, ${a.inspections.length} inspection(s)`);
-    blocks.push({ type: "project", name: a.project.name, meta: a.project.address || "" });
-    blocks.push({ type: "text", text: stats });
-    if (a.openIssues.length) blocks.push({ type: "label", text: `Open issues (${a.openIssues.length})` }, { type: "bullets", items: a.openIssues.map(issueBullet) });
-    if (a.fixedIssues.length) blocks.push({ type: "label", text: `Fixed this week (${a.fixedIssues.length})` }, { type: "bullets", items: a.fixedIssues.map((i) => `[${i.trade || "General"}] ${i.title}`) });
-    if (a.inspections.length) blocks.push({ type: "label", text: `Inspections this week (${a.inspections.length})` }, { type: "bullets", items: a.inspections.map(inspectionBullet) });
-    if (a.materials.length) blocks.push({ type: "label", text: `Materials added (${a.materials.length})` }, { type: "bullets", items: a.materials.map((m) => `${m.name}${m.quantity ? " x " + m.quantity : ""}${m.dimensions ? " (" + m.dimensions + ")" : ""}`) });
-  }
-  if (!blocks.length) blocks.push({ type: "text", text: "No activity in the last 7 days." });
-  const report = { title: "Weekly Report", subtitle: range, blocks };
-
-  openSheet(`
-    <h2>Weekly Report</h2>
-    ${
-      narrative
-        ? `<div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6; white-space:pre-wrap;">${escapeHtml(narrative)}</div>`
-        : `<div class="card" style="padding:14px 16px; font-size:14px; line-height:1.6;">${factLines.length ? factLines.map(escapeHtml).join("<br>") : "No activity in the last 7 days."}</div>
-           <p class="empty">Add a Claude API key in Settings for a written weekly summary (completed work, inspections, next week's plan).</p>`
-    }
-    ${reportPdfButton()}
-    ${closeButton()}
-  `);
-  wireCloseButton();
-  wireReportPdf(report, `Weekly Report - ${now.toISOString().slice(0, 10)}`);
 }
 
 // ---------- helpers ----------
