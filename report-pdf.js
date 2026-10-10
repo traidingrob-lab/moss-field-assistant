@@ -11,6 +11,16 @@
 // are fine). Anything outside that — emoji, curly quotes, the narrow no-break
 // space newer browsers put before "PM" — would print as garbage, so it's
 // swapped for a plain equivalent or dropped.
+// Spanish text is printed black and English text navy blue, all at one size.
+const NOTE_PT = 12.5;
+const NOTE_LEAD = 16.5;
+function noteRgb(lang) {
+  return lang === "en" ? [26, 43, 109] : [0, 0, 0];
+}
+function origLangOf(translationLang) {
+  return translationLang === "en" ? "es" : translationLang === "es" ? "en" : "";
+}
+
 function pdfSafe(str) {
   return String(str ?? "")
     .replace(/\r/g, "")
@@ -314,14 +324,14 @@ async function buildIssuesPdf(sections, opts = {}) {
 
       const note = pdfSafe(issue.note).trim();
       if (note) {
-        font("normal", 10.5);
-        color(INK);
+        font("normal", NOTE_PT);
+        color(noteRgb(origLangOf(issue.translationLang)));
         const lines = doc.splitTextToSize(note, contentW);
         // Line by line, so a long note can continue onto the next page.
         for (const line of lines) {
-          ensure(14);
-          doc.text(line, M, y + 10);
-          y += 14;
+          ensure(NOTE_LEAD);
+          doc.text(line, M, y + 12);
+          y += NOTE_LEAD;
         }
       } else {
         font("italic", 10);
@@ -340,12 +350,12 @@ async function buildIssuesPdf(sections, opts = {}) {
         ensure(13);
         doc.text(pdfSafe(issue.translationLabel || "Translation"), M, y + 9);
         y += 13;
-        font("normal", 13.5);
-        color(INK);
+        font("normal", NOTE_PT);
+        color(noteRgb(issue.translationLang));
         for (const line of doc.splitTextToSize(tr, contentW)) {
-          ensure(18);
-          doc.text(line, M, y + 13);
-          y += 18;
+          ensure(NOTE_LEAD);
+          doc.text(line, M, y + 12);
+          y += NOTE_LEAD;
         }
       }
 
@@ -479,17 +489,17 @@ async function buildMaterialsPdf(sections, opts = {}) {
       );
       let note = pdfSafe(item.note).trim();
       if (note.length > 1200) note = note.slice(0, 1200).trimEnd() + "...";
-      font("normal", 9.5);
+      font("normal", 11.5);
       const noteL = note ? doc.splitTextToSize(note, textW) : [];
       let trText = pdfSafe(item.translation).trim();
       if (trText.length > 1200) trText = trText.slice(0, 1200).trimEnd() + "...";
-      font("normal", 12);
+      font("normal", 11.5);
       const trL = trText ? doc.splitTextToSize(trText, textW) : [];
       font("normal", 8.5);
       const stampL = item.stamp ? doc.splitTextToSize(pdfSafe(item.stamp), textW) : [];
 
       const textH =
-        nameL.length * 14.5 + dimL.length * 12.5 + (qtyText ? 13 : 0) + noteL.length * 12 + (trL.length ? 12 + trL.length * 15.5 : 0) + stampL.length * 10.5 + 6;
+        nameL.length * 14.5 + dimL.length * 12.5 + (qtyText ? 13 : 0) + noteL.length * 14.5 + (trL.length ? 12 + trL.length * 14.5 : 0) + stampL.length * 10.5 + 6;
       const rowH = Math.max(textH, ph, BOX + 4);
       ensure(rowH + 14);
 
@@ -523,20 +533,20 @@ async function buildMaterialsPdf(sections, opts = {}) {
         ty += 13;
       }
       if (noteL.length) {
-        font("normal", 9.5);
-        color(INK);
-        doc.text(noteL, textX, ty + 9);
-        ty += noteL.length * 12;
+        font("normal", 11.5);
+        color(noteRgb(origLangOf(item.translationLang)));
+        doc.text(noteL, textX, ty + 11);
+        ty += noteL.length * 14.5;
       }
       if (trL.length) {
         font("bold", 8.5);
         color(SOFT);
         doc.text(pdfSafe(item.translationLabel || "Translation"), textX, ty + 9);
         ty += 12;
-        font("normal", 12);
-        color(INK);
+        font("normal", 11.5);
+        color(noteRgb(item.translationLang));
         doc.text(trL, textX, ty + 11);
-        ty += trL.length * 15.5;
+        ty += trL.length * 14.5;
       }
       if (stampL.length) {
         font("normal", 8.5);
@@ -718,12 +728,12 @@ async function buildInspectionsPdf(sections, opts = {}) {
 
       const note = pdfSafe(insp.note).trim();
       if (note) {
-        font("normal", 10.5);
-        color(INK);
+        font("normal", NOTE_PT);
+        color(noteRgb(origLangOf(insp.translationLang)));
         for (const line of doc.splitTextToSize(note, contentW)) {
-          ensure(14);
-          doc.text(line, M, y + 10);
-          y += 14;
+          ensure(NOTE_LEAD);
+          doc.text(line, M, y + 12);
+          y += NOTE_LEAD;
         }
       } else {
         font("italic", 10);
@@ -741,12 +751,12 @@ async function buildInspectionsPdf(sections, opts = {}) {
         ensure(13);
         doc.text(pdfSafe(insp.translationLabel || "Translation"), M, y + 9);
         y += 13;
-        font("normal", 13.5);
-        color(INK);
+        font("normal", NOTE_PT);
+        color(noteRgb(insp.translationLang));
         for (const line of doc.splitTextToSize(tr, contentW)) {
-          ensure(18);
-          doc.text(line, M, y + 13);
-          y += 18;
+          ensure(NOTE_LEAD);
+          doc.text(line, M, y + 12);
+          y += NOTE_LEAD;
         }
       }
 
@@ -872,7 +882,8 @@ async function buildTextReportPdf(report, opts = {}) {
       paragraph(pdfSafe(block.text), M, contentW, 10.5, "bold", AMBER, 15);
       y += 1;
     } else if (block.type === "text") {
-      paragraph(pdfSafe(block.text), M, contentW, 10.5, "normal", INK, 14.5);
+      if (block.lang !== undefined) paragraph(pdfSafe(block.text), M, contentW, NOTE_PT, "normal", noteRgb(block.lang), NOTE_LEAD);
+      else paragraph(pdfSafe(block.text), M, contentW, 10.5, "normal", INK, 14.5);
       y += 6;
     } else if (block.type === "note") {
       paragraph(pdfSafe(block.text), M, contentW, 9.5, "italic", SOFT, 13);
@@ -896,7 +907,7 @@ async function buildTextReportPdf(report, opts = {}) {
       y += 4;
     } else if (block.type === "translation") {
       paragraph(pdfSafe(block.label || "Translation"), M, contentW, 9, "bold", SOFT, 13);
-      paragraph(pdfSafe(block.text), M, contentW, 13.5, "normal", INK, 18);
+      paragraph(pdfSafe(block.text), M, contentW, NOTE_PT, "normal", noteRgb(block.lang), NOTE_LEAD);
       y += 6;
     } else if (block.type === "pagebreak") {
       if (y > M + 1) {

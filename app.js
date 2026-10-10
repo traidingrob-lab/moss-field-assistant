@@ -866,10 +866,10 @@ async function renderDashboard(id) {
             }
             ${
               v.transcript
-                ? `<span class="desc" style="font-style:italic;">"${escapeHtml(v.transcript)}"</span>`
+                ? `<div style="font-size:17px; line-height:1.55; color:${noteColor(origLangOfTr(v.translationLang))};">${escapeHtml(v.transcript)}</div>`
                 : `<span class="desc" style="opacity:.6;">No transcript (speech-to-text wasn't available when this was recorded).</span>`
             }
-            ${v.translation ? `<div style="font-size:18px; line-height:1.55;"><span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}</span><br>${escapeHtml(v.translation)}</div>` : ""}
+            ${v.translation ? `<div style="font-size:17px; line-height:1.55; color:${noteColor(v.translationLang)};"><span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}</span><br>${escapeHtml(v.translation)}</div>` : ""}
             ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn ghost" data-edit-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px;">✏️ Edit text</button>
@@ -1179,7 +1179,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "49"; // matches the sw.js cache number
+const APP_VERSION = "50"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2288,7 +2288,7 @@ function openIssueDetail(issue, captures) {
             .join("")}</div>`
         : ""
     }
-    ${issue.requirement ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(issue.requirement)}</div>` : ""}
+    ${issue.requirement ? `<div class="card" style="${noteCardStyle(origLangOfTr(issue.translationLang))}">${escapeHtml(issue.requirement)}</div>` : ""}
     ${translationCardHtml(issue.translation, issue.translationLang)}
     ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
     ${listenBarHtml(noteText, issue.translation, issue.translationLang)}
@@ -2353,6 +2353,7 @@ function issuePdfData(issue, captures) {
     note,
     translation: issue.translation || "",
     translationLabel: issue.translation ? translationLabel(issue.translationLang) : "",
+    translationLang: issue.translationLang || "",
     photoDataUrl: photo?.dataUrl || null,
     extraPhotoDataUrls: (issue.extraPhotoIds || []).map((id) => captures.find((c) => c.id === id)?.dataUrl).filter(Boolean)
   };
@@ -2734,8 +2735,8 @@ async function openCapturesPdfSheet(projectId) {
         for (const c of voiceItems) {
           const stamp = stampOf(c);
           blocks.push({ type: "label", text: `Voice note${stamp ? " - " + stamp : ""}` });
-          blocks.push({ type: "text", text: c.transcript.trim() });
-          if (withTr && c.translation) blocks.push({ type: "translation", label: translationLabel(c.translationLang), text: c.translation });
+          blocks.push({ type: "text", text: c.transcript.trim(), lang: c.translationLang === "en" ? "es" : c.translationLang === "es" ? "en" : "" });
+          if (withTr && c.translation) blocks.push({ type: "translation", label: translationLabel(c.translationLang), text: c.translation, lang: c.translationLang });
         }
       }
       const parts = [];
@@ -3332,9 +3333,15 @@ document.addEventListener("click", async (e) => {
 // Leaving a screen / closing a sheet shouldn't leave the phone talking.
 window.addEventListener("hashchange", () => stopListening());
 
+// Spanish text is shown black and English text navy blue, both the same size.
+const NOTE_NAVY = "#1A2B6D";
+const noteColor = (lang) => (lang === "en" ? NOTE_NAVY : "#000");
+const origLangOfTr = (trLang) => (trLang === "en" ? "es" : trLang === "es" ? "en" : "");
+const noteCardStyle = (lang) => `padding:12px 14px; font-size:17px; line-height:1.55; white-space:pre-wrap; color:${noteColor(lang)};`;
+
 function translationCardHtml(text, lang) {
   if (!text) return "";
-  return `<div class="card" style="padding:12px 14px; font-size:18px; line-height:1.55; white-space:pre-wrap;"><span class="desc">🌐 ${escapeHtml(translationLabel(lang))}</span><br>${escapeHtml(text)}</div>`;
+  return `<div class="card" style="${noteCardStyle(lang)}"><span class="desc">🌐 ${escapeHtml(translationLabel(lang))}</span><br>${escapeHtml(text)}</div>`;
 }
 
 // Never throws: returns { translation, target } or null (switch off, no key,
@@ -3811,7 +3818,7 @@ function openMaterialDetail(material, captures) {
     ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Material photo">` : ""}
     ${
       material.note
-        ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${
+        ? `<div class="card" style="${noteCardStyle(origLangOfTr(material.translationLang))}">${
             material.recordedAt ? `<span class="desc">${escapeHtml(issueStamp(new Date(material.recordedAt)))}</span><br>` : ""
           }${escapeHtml(material.note)}</div>`
         : ""
@@ -3921,6 +3928,7 @@ async function openMaterialsPdfSheet(projectId) {
             note: m.note || "",
             translation: m.translation || "",
             translationLabel: m.translation ? translationLabel(m.translationLang) : "",
+            translationLang: m.translationLang || "",
             stamp: m.recordedAt ? issueStamp(new Date(m.recordedAt)) : "",
             photoDataUrl: g.captures.find((c) => c.id === m.photoId)?.dataUrl || null
           }))
@@ -4376,6 +4384,7 @@ function inspectionPdfData(insp, captures) {
     note: insp.comments || "",
     translation: insp.translation || "",
     translationLabel: insp.translation ? translationLabel(insp.translationLang) : "",
+    translationLang: insp.translationLang || "",
     photos
   };
 }
@@ -4465,7 +4474,7 @@ function openInspectionDetail(insp, captures) {
     <h2>${escapeHtml(data.title)}</h2>
     <span class="desc">${[`${info.icon} ${info.short}`, data.stamp, data.inspector ? "Inspector: " + data.inspector : ""].filter(Boolean).map(escapeHtml).join(" · ")}</span>
     ${data.photos.length ? `<div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">${data.photos.map((p) => `<img src="${p}" alt="Inspection photo" style="width:100%; border-radius:10px; display:block;">`).join("")}</div>` : ""}
-    ${data.note ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(data.note)}</div>` : ""}
+    ${data.note ? `<div class="card" style="${noteCardStyle(origLangOfTr(insp.translationLang))}">${escapeHtml(data.note)}</div>` : ""}
     ${translationCardHtml(insp.translation, insp.translationLang)}
     ${retranslateButtonHtml("d-retr", !!insp.translation, data.note)}
     ${listenBarHtml(data.note, insp.translation, insp.translationLang)}
