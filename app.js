@@ -526,9 +526,15 @@ function openPhotoViewer(photo) {
           : ""
       }
     </div>
+    <button class="btn ghost" id="pv-delete" style="width:100%; color:var(--red, #DC2626);">🗑 Delete photo</button>
     ${closeButton()}
   `);
   wireCloseButton();
+  document.getElementById("pv-delete").addEventListener("click", async () => {
+    const [issues, caps] = await Promise.all([MossDB.issues.forProject(photo.projectId), MossDB.captures.forProject(photo.projectId)]);
+    const owner = captureOwnerLabel(photo, issues, caps.filter((c) => c.type === "material"), caps.filter((c) => c.type === "inspection"));
+    confirmCaptureDelete("photo", photo.projectId, [photo], owner, true);
+  });
 }
 
 async function openNewProjectSheet() {
@@ -1170,7 +1176,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "45"; // matches the sw.js cache number
+const APP_VERSION = "46"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
