@@ -340,12 +340,12 @@ async function buildIssuesPdf(sections, opts = {}) {
         ensure(13);
         doc.text(pdfSafe(issue.translationLabel || "Translation"), M, y + 9);
         y += 13;
-        font("italic", 10.5);
+        font("normal", 13.5);
         color(INK);
         for (const line of doc.splitTextToSize(tr, contentW)) {
-          ensure(14);
-          doc.text(line, M, y + 10);
-          y += 14;
+          ensure(18);
+          doc.text(line, M, y + 13);
+          y += 18;
         }
       }
 
@@ -483,13 +483,13 @@ async function buildMaterialsPdf(sections, opts = {}) {
       const noteL = note ? doc.splitTextToSize(note, textW) : [];
       let trText = pdfSafe(item.translation).trim();
       if (trText.length > 1200) trText = trText.slice(0, 1200).trimEnd() + "...";
-      font("italic", 9.5);
+      font("normal", 12);
       const trL = trText ? doc.splitTextToSize(trText, textW) : [];
       font("normal", 8.5);
       const stampL = item.stamp ? doc.splitTextToSize(pdfSafe(item.stamp), textW) : [];
 
       const textH =
-        nameL.length * 14.5 + dimL.length * 12.5 + (qtyText ? 13 : 0) + noteL.length * 12 + (trL.length ? 12 + trL.length * 12 : 0) + stampL.length * 10.5 + 6;
+        nameL.length * 14.5 + dimL.length * 12.5 + (qtyText ? 13 : 0) + noteL.length * 12 + (trL.length ? 12 + trL.length * 15.5 : 0) + stampL.length * 10.5 + 6;
       const rowH = Math.max(textH, ph, BOX + 4);
       ensure(rowH + 14);
 
@@ -533,10 +533,10 @@ async function buildMaterialsPdf(sections, opts = {}) {
         color(SOFT);
         doc.text(pdfSafe(item.translationLabel || "Translation"), textX, ty + 9);
         ty += 12;
-        font("italic", 9.5);
+        font("normal", 12);
         color(INK);
-        doc.text(trL, textX, ty + 9);
-        ty += trL.length * 12;
+        doc.text(trL, textX, ty + 11);
+        ty += trL.length * 15.5;
       }
       if (stampL.length) {
         font("normal", 8.5);
@@ -741,12 +741,12 @@ async function buildInspectionsPdf(sections, opts = {}) {
         ensure(13);
         doc.text(pdfSafe(insp.translationLabel || "Translation"), M, y + 9);
         y += 13;
-        font("italic", 10.5);
+        font("normal", 13.5);
         color(INK);
         for (const line of doc.splitTextToSize(tr, contentW)) {
-          ensure(14);
-          doc.text(line, M, y + 10);
-          y += 14;
+          ensure(18);
+          doc.text(line, M, y + 13);
+          y += 18;
         }
       }
 
@@ -894,6 +894,10 @@ async function buildTextReportPdf(report, opts = {}) {
         y += 1.5;
       }
       y += 4;
+    } else if (block.type === "translation") {
+      paragraph(pdfSafe(block.label || "Translation"), M, contentW, 9, "bold", SOFT, 13);
+      paragraph(pdfSafe(block.text), M, contentW, 13.5, "normal", INK, 18);
+      y += 6;
     } else if (block.type === "pagebreak") {
       if (y > M + 1) {
         doc.addPage();

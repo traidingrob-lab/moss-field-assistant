@@ -869,7 +869,7 @@ async function renderDashboard(id) {
                 ? `<span class="desc" style="font-style:italic;">"${escapeHtml(v.transcript)}"</span>`
                 : `<span class="desc" style="opacity:.6;">No transcript (speech-to-text wasn't available when this was recorded).</span>`
             }
-            ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
+            ${v.translation ? `<div style="font-size:18px; line-height:1.55;"><span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}</span><br>${escapeHtml(v.translation)}</div>` : ""}
             ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn ghost" data-edit-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px;">✏️ Edit text</button>
@@ -1179,7 +1179,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "48"; // matches the sw.js cache number
+const APP_VERSION = "49"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2735,7 +2735,7 @@ async function openCapturesPdfSheet(projectId) {
           const stamp = stampOf(c);
           blocks.push({ type: "label", text: `Voice note${stamp ? " - " + stamp : ""}` });
           blocks.push({ type: "text", text: c.transcript.trim() });
-          if (withTr && c.translation) blocks.push({ type: "note", text: `${translationLabel(c.translationLang)}: ${c.translation}` });
+          if (withTr && c.translation) blocks.push({ type: "translation", label: translationLabel(c.translationLang), text: c.translation });
         }
       }
       const parts = [];
@@ -3334,7 +3334,7 @@ window.addEventListener("hashchange", () => stopListening());
 
 function translationCardHtml(text, lang) {
   if (!text) return "";
-  return `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;"><span class="desc">🌐 ${escapeHtml(translationLabel(lang))}</span><br>${escapeHtml(text)}</div>`;
+  return `<div class="card" style="padding:12px 14px; font-size:18px; line-height:1.55; white-space:pre-wrap;"><span class="desc">🌐 ${escapeHtml(translationLabel(lang))}</span><br>${escapeHtml(text)}</div>`;
 }
 
 // Never throws: returns { translation, target } or null (switch off, no key,
