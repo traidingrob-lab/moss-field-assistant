@@ -864,6 +864,7 @@ async function renderDashboard(id) {
                 : `<span class="desc" style="opacity:.6;">No transcript (speech-to-text wasn't available when this was recorded).</span>`
             }
             ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
+            ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
             ${v.transcript && aiConfigured() ? `<button class="btn ghost" data-retr-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">🌐 ${v.translation ? "Translate again" : "Translate"}</button>` : ""}
           </div>`
                 )
@@ -1147,7 +1148,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "39"; // matches the sw.js cache number
+const APP_VERSION = "41"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1851,7 +1852,7 @@ function openIssueSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
-        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("i-retr", !!state.translation, state.note)}
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("i-retr", !!state.translation, state.note) + listenBarHtml(state.note, state.translation, state.translationLang, "f-note")}
         <div class="field">
           <label>Trade</label>
           <select id="f-trade">${TRADES.map((t) => `<option ${t === state.trade ? "selected" : ""}>${t}</option>`).join("")}</select>
@@ -2247,6 +2248,7 @@ function openIssueDetail(issue, captures) {
         ? `<button class="btn ghost" id="d-restore" style="width:100%;">↩ Back to Open Issues</button>`
         : `<button class="btn primary" id="d-archive" style="width:100%;">🗄️ Fixed — move to drawer</button>`
     }
+    <button class="btn ghost" id="d-share" style="width:100%;">💬 Share as text message</button>
     ${photo?.dataUrl ? `<img class="issue-photo" src="${photo.dataUrl}" alt="Issue photo">` : ""}
     ${
       extraPhotos.length
@@ -2258,10 +2260,12 @@ function openIssueDetail(issue, captures) {
     ${issue.requirement ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(issue.requirement)}</div>` : ""}
     ${translationCardHtml(issue.translation, issue.translationLang)}
     ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
+    ${listenBarHtml(noteText, issue.translation, issue.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${closeButton()}
   `);
   wireCloseButton();
+  document.getElementById("d-share")?.addEventListener("click", () => openIssueShareSheet(issue, captures));
   document.getElementById("d-archive")?.addEventListener("click", async () => {
     await MossDB.issues.add({ ...issue, status: "Completed", archivedAt: new Date().toISOString() });
     closeSheet();
@@ -2747,6 +2751,296 @@ function translationLabel(lang) {
   return lang === "es" ? "Traducción al español" : "English translation";
 }
 
+// ---------- Share an issue as a text message (English or Spanish) ----------
+
+const SHARE_LANG_KEY = "moss_share_lang";
+const SHARE_LABELS = {
+  en: { project: "Project", trade: "Trade", date: "Date", photos: (n) => `${n} photo${n === 1 ? "" : "s"} attached`, head: "Issue" },
+  es: { project: "Proyecto", trade: "Oficio", date: "Fecha", photos: (n) => `${n} foto${n === 1 ? "" : "s"} adjunta${n === 1 ? "" : "s"}`, head: "Problema" }
+};
+
+function dataUrlToBlob(dataUrl) {
+  const m = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl || "");
+  if (!m) return null;
+  const bin = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: m[1] || "image/jpeg" });
+}
+
+// Builds the message text for an issue in `lang`: title, details and the note
+// (the original when it is already in that language, otherwise the AI
+// translation — made on the spot if the note has none yet).
+async function buildIssueMessage(issue, captures, lang) {
+  const L = SHARE_LABELS[lang] || SHARE_LABELS.en;
+  const project = await MossDB.projects.get(issue.projectId);
+  const data = issuePdfData(issue, captures);
+  const note = data.note.trim();
+  let tr = issue.translation || "";
+  let trLang = issue.translationLang || "";
+  if (note && !tr && aiConfigured()) {
+    const r = await tryTranslate(note, true);
+    if (r) {
+      tr = r.translation;
+      trLang = r.target;
+    }
+  }
+  const noteText = note && tr && (trLang === "en" || trLang === "es") && trLang === lang ? tr : note;
+
+  let title = issue.title;
+  if (aiConfigured()) {
+    try {
+      title = await withTimeout(translateIssueTitle(issue.title, lang), 20000, "it took too long");
+    } catch {}
+  }
+  const lines = [`📋 ${L.head}: ${title}`];
+  if (project) lines.push(`${L.project}: ${project.name}${project.address ? " — " + project.address : ""}`);
+  if (issue.trade) lines.push(`${L.trade}: ${issue.trade}`);
+  if (data.stamp) lines.push(`${L.date}: ${data.stamp}`);
+  if (noteText) lines.push("", noteText);
+  return lines.join("\n");
+}
+
+async function openIssueShareSheet(issue, captures) {
+  let lang = "en";
+  try {
+    lang = localStorage.getItem(SHARE_LANG_KEY) === "es" ? "es" : "en";
+  } catch {}
+  const photoUrls = [issue.photoId, ...(issue.extraPhotoIds || [])]
+    .map((id) => captures.find((c) => c.id === id)?.dataUrl)
+    .filter(Boolean);
+  let run = 0;
+  let message = "";
+  let closed = false;
+
+  const draw = (busy) => {
+    const probe = photoUrls.length && typeof File !== "undefined" ? new File([new Blob(["x"])], "p.jpg", { type: "image/jpeg" }) : null;
+    const canSharePhotos = !!(probe && navigator.canShare && navigator.canShare({ files: [probe] }));
+    openSheet(
+      `
+      <h2>Share as text message</h2>
+      <div class="field"><label>Language of the message</label>
+        <div style="display:flex; gap:8px;">
+          <button class="btn ${lang === "en" ? "primary" : "ghost"}" data-share-lang="en" ${busy ? "disabled" : ""} style="flex:1;">English</button>
+          <button class="btn ${lang === "es" ? "primary" : "ghost"}" data-share-lang="es" ${busy ? "disabled" : ""} style="flex:1;">Español</button>
+        </div>
+      </div>
+      ${
+        busy
+          ? `<p class="empty" style="text-align:left;">🌐 ${lang === "es" ? "Preparando el mensaje…" : "Preparing the message…"}</p>`
+          : `<div class="field"><label>Message (you can edit it)</label><textarea id="sh-text" rows="9" style="min-height:200px;">${escapeHtml(message)}</textarea></div>`
+      }
+      ${
+        photoUrls.length && !busy
+          ? canSharePhotos
+            ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="sh-photos" checked style="width:20px; height:20px;"> Include ${photoUrls.length} photo${photoUrls.length === 1 ? "" : "s"} (opens the share sheet)</label>`
+            : `<p class="empty" style="text-align:left;">Photos can't be attached on this device from here — the text goes without them.</p>`
+          : ""
+      }
+      <div class="sheet-actions" style="flex-direction:column;">
+        <button class="btn primary" id="sh-sms" ${busy ? "disabled" : ""}>💬 Send as text message</button>
+        <button class="btn ghost" id="sh-share" ${busy ? "disabled" : ""}>📤 Share… (WhatsApp, email, …)</button>
+        <button class="btn ghost" id="sh-copy" ${busy ? "disabled" : ""}>📋 Copy text</button>
+        <button class="btn ghost" id="sh-close">Close</button>
+      </div>`,
+      () => {
+        closed = true;
+        run++;
+      }
+    );
+    wire();
+  };
+
+  const currentText = () => (document.getElementById("sh-text")?.value ?? message).trim();
+
+  const wire = () => {
+    document.querySelectorAll("[data-share-lang]").forEach((b) =>
+      b.addEventListener("click", () => {
+        lang = b.dataset.shareLang === "es" ? "es" : "en";
+        try { localStorage.setItem(SHARE_LANG_KEY, lang); } catch {}
+        prepare();
+      })
+    );
+    document.getElementById("sh-close")?.addEventListener("click", closeSheet);
+    document.getElementById("sh-sms")?.addEventListener("click", () => {
+      const text = currentText();
+      const sep = /iPhone|iPad|iPod|Mac/i.test(navigator.userAgent || "") ? "&" : "?";
+      const a = document.createElement("a");
+      a.href = `sms:${sep}body=${encodeURIComponent(text)}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+    document.getElementById("sh-share")?.addEventListener("click", async () => {
+      const text = currentText();
+      const withPhotos = document.getElementById("sh-photos")?.checked;
+      try {
+        const data = { text };
+        if (withPhotos) {
+          data.files = photoUrls.map((u, i) => new File([dataUrlToBlob(u)], `issue-photo-${i + 1}.jpg`, { type: "image/jpeg" }));
+          if (!(navigator.canShare && navigator.canShare({ files: data.files }))) delete data.files;
+        }
+        if (navigator.share) await navigator.share(data);
+        else toast("Sharing isn't available here — use Copy text");
+      } catch (err) {
+        if (err && err.name !== "AbortError") toast("Couldn't open sharing — use Copy text");
+      }
+    });
+    document.getElementById("sh-copy")?.addEventListener("click", async () => {
+      const text = currentText();
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("Copied");
+      } catch {
+        const ta = document.getElementById("sh-text");
+        if (ta) { ta.focus(); ta.select(); }
+        toast("Select the text and copy it");
+      }
+    });
+  };
+
+  const prepare = async () => {
+    const my = ++run;
+    draw(true);
+    let text;
+    try {
+      text = await buildIssueMessage(issue, captures, lang);
+    } catch (err) {
+      console.error("Building the message failed", err);
+      text = `📋 ${issue.title}`;
+    }
+    if (closed || my !== run) return;
+    message = text;
+    draw(false);
+  };
+
+  prepare();
+}
+
+// ---------- Listen: read a note aloud in English or Spanish ----------
+// The phone's own text-to-speech reads the note in the language picked,
+// whatever language it was recorded in: the original when it already is in
+// that language, otherwise the AI translation (made on the spot if the note
+// has none yet).
+
+function speechSupported() {
+  return typeof window !== "undefined" && "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance !== "undefined";
+}
+
+function listenBarHtml(note, translation, translationLang, noteElId) {
+  const text = String(note || "").trim();
+  if (!text || !speechSupported()) return "";
+  return `<div data-listen-note="${escapeHtml(text)}" data-listen-tr="${escapeHtml(translation || "")}" data-listen-trlang="${escapeHtml(translationLang || "")}" ${noteElId ? `data-listen-el="${escapeHtml(noteElId)}"` : ""} style="display:flex; gap:8px;">
+    <button class="btn ghost" data-listen="en" style="flex:1; padding:9px 6px; font-size:13px;">🔊 Listen in English</button>
+    <button class="btn ghost" data-listen="es" style="flex:1; padding:9px 6px; font-size:13px;">🔊 Escuchar en Español</button>
+  </div>`;
+}
+
+let listening = null; // { btn, label }
+const listenCache = new Map(); // note text -> { translation, lang }
+
+function stopListening() {
+  try { window.speechSynthesis.cancel(); } catch {}
+  if (listening) {
+    listening.btn.textContent = listening.label;
+    listening.btn.disabled = false;
+    listening = null;
+  }
+}
+
+function pickSpeechVoice(lang) {
+  let voices = [];
+  try { voices = window.speechSynthesis.getVoices() || []; } catch {}
+  const wanted = lang === "es" ? ["es-US", "es-MX", "es-ES", "es"] : ["en-US", "en-GB", "en"];
+  for (const code of wanted) {
+    const v = voices.find((x) => x.lang && x.lang.replace("_", "-").toLowerCase().startsWith(code.toLowerCase()));
+    if (v) return v;
+  }
+  return null;
+}
+
+// Speaks `text`; resolves when finished or stopped. Long text is cut into
+// sentences: phones cut off long single utterances.
+function speakText(text, lang) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    for (const part of String(text).replace(/\s+/g, " ").match(/[^.!?;\n]+[.!?;]*/g) || [String(text)]) {
+      let rest = part.trim();
+      while (rest.length > 220) {
+        const cut = rest.lastIndexOf(" ", 220);
+        chunks.push(rest.slice(0, cut > 40 ? cut : 220));
+        rest = rest.slice(cut > 40 ? cut : 220).trim();
+      }
+      if (rest) chunks.push(rest);
+    }
+    if (!chunks.length) return resolve();
+    const voice = pickSpeechVoice(lang);
+    let i = 0;
+    const next = () => {
+      if (i >= chunks.length) return resolve();
+      const u = new SpeechSynthesisUtterance(chunks[i++]);
+      u.lang = voice ? voice.lang : lang === "es" ? "es-US" : "en-US";
+      if (voice) u.voice = voice;
+      u.rate = 0.95;
+      u.onend = next;
+      u.onerror = () => resolve();
+      window.speechSynthesis.speak(u);
+    };
+    next();
+  });
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest("[data-listen]") : null;
+  if (!btn) return;
+  const bar = btn.closest("[data-listen-note]");
+  if (!bar || !speechSupported()) return;
+  const wasThis = listening && listening.btn === btn;
+  stopListening();
+  if (wasThis) return; // second tap = stop
+  const want = btn.dataset.listen === "es" ? "es" : "en";
+  const shown = bar.dataset.listenNote || "";
+  const live = bar.dataset.listenEl ? document.getElementById(bar.dataset.listenEl) : null;
+  const note = (live ? live.value : shown).trim();
+  if (!note) return;
+  // A translation made for older text doesn't match a note edited since.
+  let tr = note === shown.trim() ? bar.dataset.listenTr || "" : "";
+  let trLang = tr ? bar.dataset.listenTrlang || "" : "";
+
+  const label = btn.textContent;
+  listening = { btn, label };
+  btn.textContent = "⏳ …";
+  try {
+    if (!tr && aiConfigured()) {
+      let hit = listenCache.get(note);
+      if (!hit) {
+        const r = await tryTranslate(note, true);
+        if (r) {
+          hit = { translation: r.translation, lang: r.target };
+          listenCache.set(note, hit);
+        }
+      }
+      if (hit) {
+        tr = hit.translation;
+        trLang = hit.lang;
+      }
+    }
+    if (!listening || listening.btn !== btn) return; // stopped meanwhile
+    let text = note;
+    if (tr && (trLang === "en" || trLang === "es") && want === trLang) text = tr; // want the translated language
+    else if (!tr && !aiConfigured()) toast("Add a Claude API key in Settings to hear it translated");
+    btn.textContent = "⏹ Stop";
+    await speakText(text, want);
+  } catch (err) {
+    console.error("Listen failed", err);
+    toast("Couldn't play the note");
+  } finally {
+    if (listening && listening.btn === btn) stopListening();
+  }
+});
+// Leaving a screen / closing a sheet shouldn't leave the phone talking.
+window.addEventListener("hashchange", () => stopListening());
+
 function translationCardHtml(text, lang) {
   if (!text) return "";
   return `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;"><span class="desc">🌐 ${escapeHtml(translationLabel(lang))}</span><br>${escapeHtml(text)}</div>`;
@@ -2916,7 +3210,7 @@ function openMaterialSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
-        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("m-retr", !!state.translation, state.note)}
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("m-retr", !!state.translation, state.note) + listenBarHtml(state.note, state.translation, state.translationLang, "f-note")}
       `
         : "";
 
@@ -3233,6 +3527,7 @@ function openMaterialDetail(material, captures) {
     }
     ${translationCardHtml(material.translation, material.translationLang)}
     ${retranslateButtonHtml("d-retr", !!material.translation, material.note)}
+    ${listenBarHtml(material.note, material.translation, material.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     ${material.sources && material.sources.length ? `<span class="desc">Checked online: ${material.sources.map(escapeHtml).join(", ")}</span>` : ""}
     <button class="btn ghost" id="d-archive" style="width:100%;">${material.archived ? "↩ Put back on the list" : "🗄️ Bought — move to drawer"}</button>
@@ -3444,7 +3739,7 @@ async function openInspectionSheet(preProjectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="in-note" rows="9" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what was said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
-        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("in-retr", !!state.translation, state.note)}
+        ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("in-retr", !!state.translation, state.note) + listenBarHtml(state.note, state.translation, state.translationLang, "in-note")}
         ${state.analyzing ? `<p class="empty" style="text-align:left;">🤖 AI is writing up the note and naming the inspection…</p>` : ""}
         ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
         ${aiConfigured() && !state.analyzing ? `<button class="btn ghost" id="in-ai" ${state.saving || state.translating ? "disabled" : ""}>🤖 ${state.aiRan ? "Run AI again" : "Name it with AI"}</button>` : ""}`;
@@ -3882,6 +4177,7 @@ function openInspectionDetail(insp, captures) {
     ${data.note ? `<div class="card" style="padding:12px 14px; font-size:14px; line-height:1.5; white-space:pre-wrap;">${escapeHtml(data.note)}</div>` : ""}
     ${translationCardHtml(insp.translation, insp.translationLang)}
     ${retranslateButtonHtml("d-retr", !!insp.translation, data.note)}
+    ${listenBarHtml(data.note, insp.translation, insp.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     <button class="btn primary" id="d-pdf" style="width:100%;">📄 Create PDF</button>
     <button class="btn ghost" id="d-delete" style="width:100%; color:var(--red, #DC2626);">🗑 Delete inspection</button>
