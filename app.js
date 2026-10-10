@@ -865,6 +865,7 @@ async function renderDashboard(id) {
             }
             ${v.translation ? `<span class="desc">🌐 ${escapeHtml(translationLabel(v.translationLang))}: ${escapeHtml(v.translation)}</span>` : ""}
             ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
+            ${v.transcript ? `<button class="btn ghost" data-share-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">💬 Share as text</button>` : ""}
             ${v.transcript && aiConfigured() ? `<button class="btn ghost" data-retr-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">🌐 ${v.translation ? "Translate again" : "Translate"}</button>` : ""}
           </div>`
                 )
@@ -934,6 +935,10 @@ async function renderDashboard(id) {
       const issue = issues.find((i) => i.id === el.dataset.issueId);
       if (issue) openIssueDetail(issue, captures);
     });
+  });
+  $app.querySelectorAll("[data-share-voice]").forEach((el) => {
+    const v = captures.find((c) => c.id === el.dataset.shareVoice);
+    if (v) el.addEventListener("click", () => openVoiceShareSheet(v));
   });
   $app.querySelectorAll("[data-retr-voice]").forEach((el) => {
     const v = captures.find((c) => c.id === el.dataset.retrVoice);
@@ -1148,7 +1153,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "41"; // matches the sw.js cache number
+const APP_VERSION = "42"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2755,8 +2760,8 @@ function translationLabel(lang) {
 
 const SHARE_LANG_KEY = "moss_share_lang";
 const SHARE_LABELS = {
-  en: { project: "Project", trade: "Trade", date: "Date", photos: (n) => `${n} photo${n === 1 ? "" : "s"} attached`, head: "Issue" },
-  es: { project: "Proyecto", trade: "Oficio", date: "Fecha", photos: (n) => `${n} foto${n === 1 ? "" : "s"} adjunta${n === 1 ? "" : "s"}`, head: "Problema" }
+  en: { project: "Project", inspection: "Inspection", result: "Result", inspector: "Inspector", resultNames: { passed: "Passed", failed: "Failed", scheduled: "Scheduled" }, trade: "Trade", date: "Date", photos: (n) => `${n} photo${n === 1 ? "" : "s"} attached`, head: "Issue", voice: "Voice note" },
+  es: { project: "Proyecto", inspection: "Inspección", result: "Resultado", inspector: "Inspector", resultNames: { passed: "Aprobada", failed: "Reprobada", scheduled: "Programada" }, trade: "Oficio", date: "Fecha", photos: (n) => `${n} foto${n === 1 ? "" : "s"} adjunta${n === 1 ? "" : "s"}`, head: "Problema", voice: "Nota de voz" }
 };
 
 function dataUrlToBlob(dataUrl) {
@@ -2801,20 +2806,101 @@ async function buildIssueMessage(issue, captures, lang) {
   return lines.join("\n");
 }
 
-async function openIssueShareSheet(issue, captures) {
+function openIssueShareSheet(issue, captures) {
+  const photoUrls = [issue.photoId, ...(issue.extraPhotoIds || [])]
+    .map((id) => captures.find((c) => c.id === id)?.dataUrl)
+    .filter(Boolean);
+  return openShareSheet({
+    build: (lang) => buildIssueMessage(issue, captures, lang),
+    fallback: `📋 ${issue.title}`,
+    files: photoUrls.map((u, i) => ({ url: u, name: `issue-photo-${i + 1}.jpg`, type: "image/jpeg" })),
+    noun: "photo"
+  });
+}
+
+// Message text for a voice note in `lang` (original if already in that
+// language, else its AI translation, made on the spot if missing).
+async function buildVoiceMessage(v, lang) {
+  const L = SHARE_LABELS[lang] || SHARE_LABELS.en;
+  const project = v.projectId ? await MossDB.projects.get(v.projectId) : null;
+  const note = String(v.transcript || "").trim();
+  let tr = v.translation || "";
+  let trLang = v.translationLang || "";
+  if (note && !tr && aiConfigured()) {
+    const r = await tryTranslate(note, true);
+    if (r) {
+      tr = r.translation;
+      trLang = r.target;
+    }
+  }
+  const noteText = note && tr && (trLang === "en" || trLang === "es") && trLang === lang ? tr : note;
+  const lines = [`🎤 ${L.voice}`];
+  if (project) lines.push(`${L.project}: ${project.name}${project.address ? " — " + project.address : ""}`);
+  if (v.createdAt) lines.push(`${L.date}: ${new Date(v.createdAt).toLocaleString(lang === "es" ? "es-US" : "en-US")}`);
+  if (noteText) lines.push("", noteText);
+  return lines.join("\n");
+}
+
+function openVoiceShareSheet(v) {
+  const mime = (/^data:([^;,]+)/.exec(v.dataUrl || "") || [])[1] || "audio/mp4";
+  const ext = /webm/.test(mime) ? "webm" : /ogg/.test(mime) ? "ogg" : /mpeg|mp3/.test(mime) ? "mp3" : "m4a";
+  return openShareSheet({
+    build: (lang) => buildVoiceMessage(v, lang),
+    fallback: `🎤 ${v.transcript || ""}`,
+    files: v.dataUrl ? [{ url: v.dataUrl, name: `voice-note.${ext}`, type: mime }] : [],
+    noun: "audio file"
+  });
+}
+
+async function buildInspectionMessage(insp, captures, lang) {
+  const L = SHARE_LABELS[lang] || SHARE_LABELS.en;
+  const project = await MossDB.projects.get(insp.projectId);
+  const data = inspectionPdfData(insp, captures);
+  const note = data.note.trim();
+  let tr = insp.translation || "";
+  let trLang = insp.translationLang || "";
+  if (note && !tr && aiConfigured()) {
+    const r = await tryTranslate(note, true);
+    if (r) {
+      tr = r.translation;
+      trLang = r.target;
+    }
+  }
+  const noteText = note && tr && (trLang === "en" || trLang === "es") && trLang === lang ? tr : note;
+  const info = inspectionResultInfo(insp.result);
+  const resName = L.resultNames[String(info.short || "").toLowerCase()] || info.short;
+  const lines = [`🏛️ ${L.inspection}: ${data.title}`];
+  if (project) lines.push(`${L.project}: ${project.name}${project.address ? " — " + project.address : ""}`);
+  if (resName) lines.push(`${L.result}: ${info.icon} ${resName}`);
+  if (data.inspector) lines.push(`${L.inspector}: ${data.inspector}`);
+  if (data.stamp) lines.push(`${L.date}: ${data.stamp}`);
+  if (noteText) lines.push("", noteText);
+  return lines.join("\n");
+}
+
+function openInspectionShareSheet(insp, captures) {
+  const data = inspectionPdfData(insp, captures);
+  return openShareSheet({
+    build: (lang) => buildInspectionMessage(insp, captures, lang),
+    fallback: `🏛️ ${data.title}`,
+    files: data.photos.map((u, i) => ({ url: u, name: `inspection-photo-${i + 1}.jpg`, type: "image/jpeg" })),
+    noun: "photo"
+  });
+}
+
+async function openShareSheet(opts) {
   let lang = "en";
   try {
     lang = localStorage.getItem(SHARE_LANG_KEY) === "es" ? "es" : "en";
   } catch {}
-  const photoUrls = [issue.photoId, ...(issue.extraPhotoIds || [])]
-    .map((id) => captures.find((c) => c.id === id)?.dataUrl)
-    .filter(Boolean);
+  const photoUrls = opts.files;
+  const noun = opts.noun || "photo";
   let run = 0;
   let message = "";
   let closed = false;
 
   const draw = (busy) => {
-    const probe = photoUrls.length && typeof File !== "undefined" ? new File([new Blob(["x"])], "p.jpg", { type: "image/jpeg" }) : null;
+    const probe = photoUrls.length && typeof File !== "undefined" ? new File([new Blob(["x"])], photoUrls[0].name, { type: photoUrls[0].type }) : null;
     const canSharePhotos = !!(probe && navigator.canShare && navigator.canShare({ files: [probe] }));
     openSheet(
       `
@@ -2833,8 +2919,8 @@ async function openIssueShareSheet(issue, captures) {
       ${
         photoUrls.length && !busy
           ? canSharePhotos
-            ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="sh-photos" checked style="width:20px; height:20px;"> Include ${photoUrls.length} photo${photoUrls.length === 1 ? "" : "s"} (opens the share sheet)</label>`
-            : `<p class="empty" style="text-align:left;">Photos can't be attached on this device from here — the text goes without them.</p>`
+            ? `<label style="display:flex; gap:10px; align-items:center; font-size:14px;"><input type="checkbox" id="sh-photos" checked style="width:20px; height:20px;"> Include ${photoUrls.length} ${noun}${photoUrls.length === 1 ? "" : "s"} (opens the share sheet)</label>`
+            : `<p class="empty" style="text-align:left;">The ${noun}${photoUrls.length === 1 ? "" : "s"} can't be attached on this device from here — the text goes without them.</p>`
           : ""
       }
       <div class="sheet-actions" style="flex-direction:column;">
@@ -2877,7 +2963,7 @@ async function openIssueShareSheet(issue, captures) {
       try {
         const data = { text };
         if (withPhotos) {
-          data.files = photoUrls.map((u, i) => new File([dataUrlToBlob(u)], `issue-photo-${i + 1}.jpg`, { type: "image/jpeg" }));
+          data.files = photoUrls.map((f) => new File([dataUrlToBlob(f.url)], f.name, { type: f.type }));
           if (!(navigator.canShare && navigator.canShare({ files: data.files }))) delete data.files;
         }
         if (navigator.share) await navigator.share(data);
@@ -2904,10 +2990,10 @@ async function openIssueShareSheet(issue, captures) {
     draw(true);
     let text;
     try {
-      text = await buildIssueMessage(issue, captures, lang);
+      text = await opts.build(lang);
     } catch (err) {
       console.error("Building the message failed", err);
-      text = `📋 ${issue.title}`;
+      text = opts.fallback;
     }
     if (closed || my !== run) return;
     message = text;
@@ -4180,6 +4266,7 @@ function openInspectionDetail(insp, captures) {
     ${listenBarHtml(data.note, insp.translation, insp.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
     <button class="btn primary" id="d-pdf" style="width:100%;">📄 Create PDF</button>
+    <button class="btn ghost" id="d-share" style="width:100%;">💬 Share as text message</button>
     <button class="btn ghost" id="d-delete" style="width:100%; color:var(--red, #DC2626);">🗑 Delete inspection</button>
     ${closeButton()}
   `);
@@ -4202,6 +4289,7 @@ function openInspectionDetail(insp, captures) {
     const project = await MossDB.projects.get(insp.projectId);
     makeInspectionsPdf([{ project: project || { name: "Project" }, inspections: [insp], captures }]);
   });
+  document.getElementById("d-share").addEventListener("click", () => openInspectionShareSheet(insp, captures));
   document.getElementById("d-delete").addEventListener("click", () => confirmDeleteInspection(insp));
 }
 
