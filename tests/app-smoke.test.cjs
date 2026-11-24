@@ -194,6 +194,36 @@ async function go(w, hash) {
     assert.match(t, /AI photo description/);
   });
 
+  // ---- v56: botón Test AI y traducción que ya no falla en silencio ----
+  const sent = [];
+  w.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body.model);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: "thinking", thinking: "" }, { type: "text", text: "OK" }], stop_reason: "end_turn" }),
+      text: async () => "",
+      clone() { return this; }
+    };
+  };
+  doc.getElementById("ai-test").dispatchEvent(new w.Event("click"));
+  await sleep(400);
+  check("Test AI muestra el resultado de Haiku y de Sonnet", () => {
+    const t = doc.getElementById("ai-test-result").textContent;
+    assert.match(t, /✅ claude-haiku-5-5 — [\d.]+ s — "OK"/);
+    assert.match(t, /✅ claude-sonnet-5-5 — [\d.]+ s — "OK"/);
+    assert.deepStrictEqual(sent, ["claude-haiku-5-5", "claude-sonnet-5-5"]);
+  });
+
+  w.fetch = async () => ({ ok: false, status: 404, text: async () => '{"error":{"message":"model not found"}}', clone() { return this; } });
+  const tr = await w.tryTranslate("La tubería gotea.", true);
+  check("si la traducción falla, se avisa y queda en Recent problems", () => {
+    assert.strictEqual(tr, null);
+    assert.match(toastText(), /Translation failed: .*404/);
+    assert.ok(w.errorLogEntries().some((e) => e.where === "AI translation" && /model not found/.test(e.msg)));
+  });
+
   let failed = 0;
   for (const [pass, name] of results) {
     if (!pass) failed++;

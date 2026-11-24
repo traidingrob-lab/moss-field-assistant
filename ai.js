@@ -135,14 +135,21 @@ function setAiKey(key) {
 // enabled for this key's organization" (400) from a bad key (401), etc.
 // `opts.tier`: "fast" uses Haiku when Economy AI is on; anything else Sonnet.
 // `opts.effort`: "low" | "medium" | "high" (default: low on Haiku, medium on Sonnet).
+// `opts.model`: force one model (used by Settings ▸ Test AI).
+// `opts.timeoutMs`: give up after this long (default 90 s) — a call that never
+// answers used to wait forever without any error (v56).
+const AI_DEFAULT_TIMEOUT_MS = 90000;
+
 async function callClaudeFull(messages, maxTokens = 1024, tools, opts = {}) {
   const key = aiKey();
   if (!key) throw new Error("No Claude API key set — add one in Settings first.");
 
-  const useFast = opts.tier === "fast" && aiEconomyEnabled();
+  const model = opts.model || (opts.tier === "fast" && aiEconomyEnabled() ? AI_MODEL_FAST : AI_MODEL);
+  const useFast = model === AI_MODEL_FAST;
   const effort = opts.effort || (useFast ? "low" : "medium");
+  const timeoutMs = opts.timeoutMs || AI_DEFAULT_TIMEOUT_MS;
   const body = {
-    model: useFast ? AI_MODEL_FAST : AI_MODEL,
+    model,
     max_tokens: Math.min(MAX_TOKENS_CAP, maxTokens + (THINKING_HEADROOM[effort] || THINKING_HEADROOM.medium)),
     output_config: { effort },
     messages
@@ -161,8 +168,31 @@ async function callClaudeFull(messages, maxTokens = 1024, tools, opts = {}) {
     headers["anthropic-beta"] = FALLBACK_BETA;
   }
 
-  const post = () =>
-    fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify(body) });
+  const post = async () => {
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = setTimeout(() => controller && controller.abort(), timeoutMs);
+    try {
+      return await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller ? controller.signal : undefined
+      });
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        const e = new Error(`No answer from Claude after ${Math.round(timeoutMs / 1000)} seconds (${model})`);
+        e.timeout = true;
+        throw e;
+      }
+      // Network problems arrive as a bare "Load failed" / "Failed to fetch":
+      // say which model so the Problems list is useful.
+      const e = new Error(`Couldn't reach Claude (${model}): ${(err && err.message) || err}`);
+      e.network = true;
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   const dropFallbacks = () => {
     aiFallbacksSupported = false;
@@ -176,7 +206,7 @@ async function callClaudeFull(messages, maxTokens = 1024, tools, opts = {}) {
   } catch (err) {
     // If the browser blocked the request because of the extra beta header,
     // it fails as a network error (not a 400): retry once without it.
-    if (!useFallbacks) throw err;
+    if (!useFallbacks || !err.network) throw err;
     dropFallbacks();
     res = await post();
   }
@@ -230,6 +260,30 @@ async function callClaude(content, maxTokens = 1024, opts = {}) {
     .map((block) => (block.type === "text" ? block.text || "" : ""))
     .join("")
     .trim();
+}
+
+// Settings ▸ Test AI: one tiny call to each model, reporting exactly what
+// happened (time, answer or the real error). Costs a fraction of a cent.
+async function aiSelfTest() {
+  const results = [];
+  for (const model of [AI_MODEL_FAST, AI_MODEL]) {
+    const started = Date.now();
+    try {
+      const data = await callClaudeFull([{ role: "user", content: "Reply with just the word OK." }], 20, undefined, {
+        model,
+        effort: "low",
+        timeoutMs: 45000
+      });
+      const text = (data.content || [])
+        .map((b) => (b.type === "text" ? b.text || "" : ""))
+        .join("")
+        .trim();
+      results.push({ model, ok: true, ms: Date.now() - started, text: text || `(empty reply, stop: ${data.stop_reason})` });
+    } catch (err) {
+      results.push({ model, ok: false, ms: Date.now() - started, error: (err && err.message) || String(err) });
+    }
+  }
+  return results;
 }
 
 // Sends one question to Claude along with whatever project context the

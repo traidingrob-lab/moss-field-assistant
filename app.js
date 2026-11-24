@@ -70,7 +70,11 @@ function clearErrorLog() {
   } catch {}
 }
 
-window.addEventListener("error", (e) => logError("app", e.error || e.message));
+// Safari often reports only "Script error." — keep the file and line too.
+window.addEventListener("error", (e) => {
+  const where = e.filename ? `app (${String(e.filename).split("/").pop()}:${e.lineno || "?"})` : "app";
+  logError(where, e.error || e.message);
+});
 window.addEventListener("unhandledrejection", (e) => logError("app (async)", e.reason));
 
 // Opens a camera / file picker. The <input> is put into the page (hidden)
@@ -1485,7 +1489,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "55"; // matches the sw.js cache number
+const APP_VERSION = "56"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1645,6 +1649,11 @@ async function renderSettings() {
         }</span></span>
         <input type="checkbox" class="switch" id="f-ai-economy" ${aiEconomyEnabled() ? "checked" : ""} aria-label="Economy AI">
       </div>
+      <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <span class="main"><span class="icon">🧪</span> <span class="title">Test AI</span><span class="desc">Sends one tiny message to each AI model and shows exactly what happens</span></span>
+        <button class="btn ghost" id="ai-test" ${aiConfigured() ? "" : "disabled"} style="align-self:flex-start; padding:8px 14px; font-size:13px;">Run test</button>
+        <div id="ai-test-result" style="font-size:13px; white-space:pre-wrap; word-break:break-word;"></div>
+      </div>
       <div class="row">
         <span class="icon">ℹ️</span>
         <span class="main"><span class="title">App version</span><span class="desc">${APP_VERSION}</span></span>
@@ -1757,6 +1766,29 @@ async function renderSettings() {
     setAiEconomy(e.target.checked);
     toast(e.target.checked ? "Economy AI on" : "Economy AI off");
     renderSettings();
+  });
+
+  document.getElementById("ai-test")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const out = document.getElementById("ai-test-result");
+    btn.disabled = true;
+    out.textContent = "Testing… (up to a minute)";
+    try {
+      const results = await aiSelfTest();
+      out.textContent = results
+        .map((r) =>
+          r.ok
+            ? `✅ ${r.model} — ${(r.ms / 1000).toFixed(1)} s — "${r.text}"`
+            : `❌ ${r.model} — ${(r.ms / 1000).toFixed(1)} s — ${r.error}`
+        )
+        .join("\n");
+      for (const r of results) if (!r.ok) logError(`AI test ${r.model}`, new Error(r.error));
+    } catch (err) {
+      out.textContent = `❌ ${errorText(err)}`;
+      logError("AI test", err);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   (async () => {
@@ -3915,9 +3947,12 @@ function translationCardHtml(text, lang) {
 async function tryTranslate(text, force = false, previous = "") {
   if (!(force ? aiConfigured() : aiTranslateEnabled()) || !String(text || "").trim()) return null;
   try {
-    return await withTimeout(translateVoiceNote(text, previous), 20000, "it took too long");
+    return await withTimeout(translateVoiceNote(text, previous), 45000, "no answer after 45 seconds");
   } catch (err) {
     console.error("Translation failed", err);
+    // Used to be silent (v56): now it's visible and kept in Recent problems.
+    logError("AI translation", err);
+    toast(`Translation failed: ${errorText(err)}`, 6000);
     return null;
   }
 }

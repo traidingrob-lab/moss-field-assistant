@@ -19,6 +19,7 @@ function loadAi({ economy = true, responses = [] } = {}) {
     Intl,
     setTimeout,
     clearTimeout,
+    AbortController,
     localStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, String(v)),
@@ -34,6 +35,16 @@ function loadAi({ economy = true, responses = [] } = {}) {
       calls.push({ url, headers: { ...init.headers }, body: JSON.parse(init.body) });
       const next = queue.shift() || { status: 200, json: { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" } };
       if (next.networkError) throw new TypeError("Failed to fetch");
+      if (next.hang) {
+        // Nunca responde: solo termina si la app cancela (timeout).
+        return new Promise((_, reject) => {
+          init.signal && init.signal.addEventListener("abort", () => {
+            const e = new Error("The operation was aborted.");
+            e.name = "AbortError";
+            reject(e);
+          });
+        });
+      }
       const text = typeof next.json === "string" ? next.json : JSON.stringify(next.json);
       const make = () => ({
         ok: next.status >= 200 && next.status < 300,
@@ -47,7 +58,7 @@ function loadAi({ economy = true, responses = [] } = {}) {
   };
   vm.createContext(ctx);
   const src = fs.readFileSync(path.join(__dirname, "..", "ai.js"), "utf8");
-  vm.runInContext(src + "\n;this.__ai = { callClaude, askClaude, captionPhoto, translateVoiceNote, translateIssueTitle, analyzeIssueCapture, analyzeInspectionCapture, identifyMaterial, aiEconomyEnabled, setAiEconomy };", ctx);
+  vm.runInContext(src + "\n;this.__ai = { callClaude, askClaude, captionPhoto, translateVoiceNote, translateIssueTitle, analyzeIssueCapture, analyzeInspectionCapture, identifyMaterial, aiEconomyEnabled, setAiEconomy, aiSelfTest, callClaudeFull };", ctx);
   return { ai: ctx.__ai, calls, store };
 }
 
@@ -202,6 +213,44 @@ test("materiales: sin búsqueda web habilitada (400) reintenta sin herramientas"
   const r = await ai.identifyMaterial(IMG, "");
   assert.strictEqual(r.searched, false);
   assert.strictEqual(calls[1].body.tools, undefined);
+});
+
+test("si Claude nunca responde, se cancela con un error claro (v56)", async () => {
+  const { ai, calls } = loadAi({ responses: [{ hang: true }] });
+  const started = Date.now();
+  await assert.rejects(
+    ai.callClaudeFull([{ role: "user", content: "x" }], 10, undefined, { tier: "fast", timeoutMs: 300 }),
+    /No answer from Claude after 0 seconds \(claude-haiku-5-5\)/
+  );
+  assert.ok(Date.now() - started < 3000);
+  assert.strictEqual(calls.length, 1, "un timeout no debe reintentarse");
+});
+
+test("un error de red dice qué modelo falló", async () => {
+  const { ai } = loadAi({ responses: [{ networkError: true }] });
+  await assert.rejects(ai.captionPhoto(IMG), /Couldn't reach Claude \(claude-haiku-5-5\): Failed to fetch/);
+});
+
+test("Test AI prueba Haiku y Sonnet y reporta cada resultado", async () => {
+  const { ai, calls } = loadAi({
+    responses: [ok("OK"), { status: 404, json: { error: { message: "model: claude-sonnet-5-5 not found" } } }]
+  });
+  const r = JSON.parse(JSON.stringify(await ai.aiSelfTest()));
+  assert.strictEqual(r.length, 2);
+  assert.strictEqual(r[0].model, "claude-haiku-5-5");
+  assert.strictEqual(r[0].ok, true);
+  assert.strictEqual(r[0].text, "OK");
+  assert.strictEqual(r[1].model, "claude-sonnet-5-5");
+  assert.strictEqual(r[1].ok, false);
+  assert.match(r[1].error, /404.*not found/);
+  assert.strictEqual(calls[0].body.model, "claude-haiku-5-5");
+  assert.strictEqual(calls[1].body.model, "claude-sonnet-5-5");
+});
+
+test("Test AI usa el modelo pedido aunque Economy esté apagado", async () => {
+  const { ai, calls } = loadAi({ economy: false, responses: [ok("OK"), ok("OK")] });
+  await ai.aiSelfTest();
+  assert.strictEqual(calls[0].body.model, "claude-haiku-5-5");
 });
 
 test("el interruptor Economy se guarda y se lee", async () => {
