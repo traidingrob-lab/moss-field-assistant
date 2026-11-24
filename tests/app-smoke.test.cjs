@@ -324,6 +324,50 @@ async function go(w, hash) {
     }
   });
 
+  // ---- v60: borrar un issue abierto desde su detalle ----
+  const ph = await db.captures.add({ projectId: "p-del", type: "photo", dataUrl: "data:image/jpeg;base64,AAAA", name: "leak.jpg" });
+  const vo = await db.captures.add({ projectId: "p-del", type: "voice", dataUrl: "data:audio/mp4;base64,AAAA", transcript: "gotea" });
+  const allCaps = await db.captures.all();
+  const photoCap = allCaps.find((c) => c.name === "leak.jpg");
+  const voiceCap = allCaps.find((c) => c.transcript === "gotea");
+  await db.issues.add({ id: "iss-1", projectId: "p-del", title: "Leak under sink", trade: "Plumbing", photoId: photoCap.id, voiceId: voiceCap.id });
+  await db.captures.update(photoCap.id, { issueId: "iss-1" });
+  await db.captures.update(voiceCap.id, { issueId: "iss-1" });
+  const issue1 = (await db.issues.all()).find((i) => i.id === "iss-1");
+  const capsNow = await db.captures.forProject("p-del");
+
+  w.openIssueDetail(issue1, capsNow);
+  await sleep(100);
+  check("el detalle de un issue abierto tiene 🗑 Delete issue", () => assert.ok(doc.getElementById("d-delete")));
+  doc.getElementById("d-delete").dispatchEvent(new w.Event("click"));
+  await sleep(100);
+  check("pide confirmación y dice qué se borra", () =>
+    assert.match(doc.getElementById("sheet").textContent, /Delete "Leak under sink"\?[\s\S]*1 photo and its voice note/)
+  );
+  doc.getElementById("di-cancel").dispatchEvent(new w.Event("click"));
+  await sleep(100);
+  check("Cancel vuelve al detalle del issue", () => {
+    assert.ok(doc.getElementById("d-delete"), "debería verse otra vez el issue");
+    assert.match(doc.getElementById("sheet").textContent, /Leak under sink/);
+  });
+  const stillThere = (await db.issues.all()).some((i) => i.id === "iss-1");
+  check("Cancel no borra el issue", () => assert.strictEqual(stillThere, true));
+
+  doc.getElementById("d-delete").dispatchEvent(new w.Event("click"));
+  await sleep(100);
+  doc.getElementById("di-confirm").dispatchEvent(new w.Event("click"));
+  await sleep(400);
+  const issuesAfter = await db.issues.all();
+  const capsAfter = await db.captures.forProject("p-del");
+  check("Delete issue borra el issue con su foto y su nota de voz", () => {
+    assert.ok(!issuesAfter.some((i) => i.id === "iss-1"));
+    assert.ok(!capsAfter.some((c) => c.id === photoCap.id || c.id === voiceCap.id));
+    assert.match(toastText(), /Issue deleted/);
+  });
+  check("después de borrar no se sale de la app (sigue en la misma pantalla)", () =>
+    assert.match(w.location.hash, /#\/project\/p-del/)
+  );
+
 
   let failed = 0;
   for (const [pass, name] of results) {

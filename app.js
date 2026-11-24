@@ -1511,7 +1511,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "59"; // matches the sw.js cache number
+const APP_VERSION = "60"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2755,10 +2755,13 @@ function openIssueDetail(issue, captures) {
     ${retranslateButtonHtml("d-retr", !!issue.translation, noteText)}
     ${listenBarHtml(noteText, issue.translation, issue.translationLang)}
     ${voice?.dataUrl ? `<audio controls preload="metadata" style="width:100%; height:36px;" src="${voice.dataUrl}"></audio>` : ""}
+    <button class="btn ghost" id="d-delete" style="width:100%; color:var(--red, #DC2626);">🗑 Delete issue</button>
     ${closeButton()}
   `);
   wireCloseButton();
   document.getElementById("d-share")?.addEventListener("click", () => openIssueShareSheet(issue, captures));
+  // v60: delete straight from an issue (before, only from the Fixed drawer).
+  document.getElementById("d-delete")?.addEventListener("click", () => confirmIssueDelete(issue, captures));
   document.getElementById("d-archive")?.addEventListener("click", async () => {
     await MossDB.issues.add({ ...issue, status: "Completed", archivedAt: new Date().toISOString() });
     closeSheet();
@@ -2964,6 +2967,45 @@ function voiceLangPickerHtml(id, disabled) {
 // Each project has two drawers. "Fixed" issues (status Completed) and
 // "bought" materials (archived) leave the working lists but stay here; from
 // the drawer they can be restored or deleted for good (with a confirmation).
+
+// Confirmation for 🗑 Delete issue in the issue detail (v60). Cancel goes
+// back to the issue. Deletes the issue with its own photos and voice note
+// (same as deleting it from the drawer); OneDrive copies are not touched.
+function confirmIssueDelete(issue, captures) {
+  const photoCount = [issue.photoId, ...(issue.extraPhotoIds || [])].filter(Boolean).length;
+  const parts = [];
+  if (photoCount) parts.push(`${photoCount} photo${photoCount > 1 ? "s" : ""}`);
+  if (issue.voiceId) parts.push("its voice note");
+  openSheet(`
+    <h2>Delete "${escapeHtml(issue.title)}"?</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">
+      This permanently removes the issue${parts.length ? ` and ${escapeHtml(parts.join(" and "))}` : ""} from the app. It can't be undone.
+      Copies already saved in OneDrive are not deleted.${issue.status !== "Completed" ? " If it's done, you can use “Fixed — move to drawer” instead." : ""}
+    </p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="di-cancel">Cancel</button>
+      <button class="btn primary" id="di-confirm" style="background:var(--red, #DC2626);">Delete issue</button>
+    </div>
+  `);
+  document.getElementById("di-cancel").addEventListener("click", () => openIssueDetail(issue, captures));
+  document.getElementById("di-confirm").addEventListener("click", async () => {
+    const btn = document.getElementById("di-confirm");
+    btn.disabled = true;
+    try {
+      await deleteIssueCompletely(issue);
+    } catch (err) {
+      console.error("Deleting the issue failed", err);
+      logError("delete issue", err);
+      toast(`Couldn't delete: ${errorText(err)}`, 6000);
+      btn.disabled = false;
+      return;
+    }
+    closeSheet();
+    toast("Issue deleted");
+    syncCapturesWithOneDrive(); // tell other devices its photos/voice are gone (best effort, never leaves the app)
+    render();
+  });
+}
 
 async function deleteIssueCompletely(issue) {
   const caps = await MossDB.captures.forProject(issue.projectId);
