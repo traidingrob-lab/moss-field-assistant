@@ -77,6 +77,17 @@ window.addEventListener("error", (e) => {
 });
 window.addEventListener("unhandledrejection", (e) => logError("app (async)", e.reason));
 
+// Called by msGetToken (auth.js) when the Microsoft session expired during a
+// BACKGROUND sync (v59). It no longer redirects away; instead: say it once
+// per app session, and keep it in Recent problems. Work stays on the phone.
+let msSignInNoticeShown = false;
+function onMsSignInNeeded(err) {
+  if (msSignInNoticeShown) return;
+  msSignInNoticeShown = true;
+  logError("OneDrive sign-in expired", err);
+  toast("OneDrive needs you to sign in again (Settings ▸ Save now). Your work is safe on this phone.", 8000);
+}
+
 // Opens a camera / file picker. The <input> is put into the page (hidden)
 // while it's open: an input that only exists in memory can be thrown away by
 // iPhone Safari while the camera app is in front, and then the photo it
@@ -413,7 +424,7 @@ async function backupToOneDrive(onProgress = () => {}) {
     result.error = "Connect OneDrive first (Settings ▸ OneDrive ▸ Connect).";
     return result;
   }
-  const token = await msGetToken();
+  const token = await msGetToken({ interactive: true }); // the person tapped Save now: OK to go sign in
   if (!token) {
     result.error = "OneDrive needs you to sign in again. Try once more after signing in.";
     return result;
@@ -1500,7 +1511,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "58"; // matches the sw.js cache number
+const APP_VERSION = "59"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 

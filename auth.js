@@ -72,10 +72,18 @@ function msCurrentAccount() {
   return msalInstance.getActiveAccount();
 }
 
-// Returns a Graph access token, or null if not signed in. Falls back to
-// an interactive redirect if the silent refresh fails (expired session,
-// revoked consent, etc.) rather than throwing mid-capture.
-async function msGetToken() {
+// Returns a Graph access token, or null if not signed in / the session
+// expired.
+//
+// v59: background syncs (after deleting, taking a photo, opening a
+// project…) must NEVER navigate away. Before, a failed silent refresh sent
+// the whole app to Microsoft's sign-in page and back to the home screen,
+// losing whatever was on screen — it looked like the app froze and jumped
+// to the main menu. Now only an explicit action the person tapped
+// (`{ interactive: true }`, e.g. Settings ▸ Save now) may redirect;
+// everything else returns null and calls onMsSignInNeeded (defined in
+// app.js) so the app can say so once.
+async function msGetToken({ interactive = false } = {}) {
   await initMsal();
   if (!msalInstance) return null;
   const account = msalInstance.getActiveAccount();
@@ -84,8 +92,15 @@ async function msGetToken() {
     const result = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account });
     return result.accessToken;
   } catch (err) {
-    console.warn("Silent token refresh failed, redirecting to sign in again", err);
-    await msalInstance.acquireTokenRedirect({ scopes: GRAPH_SCOPES });
+    if (interactive) {
+      console.warn("Silent token refresh failed, redirecting to sign in again", err);
+      await msalInstance.acquireTokenRedirect({ scopes: GRAPH_SCOPES });
+      return null;
+    }
+    console.warn("Silent token refresh failed (background, not redirecting)", err);
+    if (typeof onMsSignInNeeded === "function") {
+      try { onMsSignInNeeded(err); } catch {}
+    }
     return null;
   }
 }
