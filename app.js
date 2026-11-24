@@ -1181,6 +1181,7 @@ async function renderDashboard(id) {
             ${v.transcript ? listenBarHtml(v.transcript, v.translation, v.translationLang) : ""}
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button class="btn ghost" data-edit-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px;">✏️ Edit text</button>
+              ${aiConfigured() && v.transcript ? `<button class="btn ghost" data-clarify-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px;">✨ Make clear</button>` : ""}
               <button class="btn ghost" data-delete-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; color:var(--red, #DC2626);">🗑 Delete</button>
             </div>
             ${v.transcript ? `<button class="btn ghost" data-share-voice="${escapeHtml(v.id)}" style="padding:6px 10px; font-size:12px; align-self:flex-start;">💬 Share as text</button>` : ""}
@@ -1267,6 +1268,16 @@ async function renderDashboard(id) {
       const owner = captureOwnerLabel(v, issues, caps.filter((c) => c.type === "material"), caps.filter((c) => c.type === "inspection"));
       confirmCaptureDelete("voice", v.projectId, [v], owner, true);
     });
+  });
+  // ✨ Make clear (v58): opens Edit text and starts the rewrite right away,
+  // so the result can still be checked (or undone) before saving.
+  $app.querySelectorAll("[data-clarify-voice]").forEach((el) => {
+    const v = captures.find((c) => c.id === el.dataset.clarifyVoice);
+    if (v)
+      el.addEventListener("click", () => {
+        openVoiceEditSheet(v);
+        document.getElementById("ve-clarify")?.click();
+      });
   });
   $app.querySelectorAll("[data-edit-voice]").forEach((el) => {
     const v = captures.find((c) => c.id === el.dataset.editVoice);
@@ -1489,7 +1500,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "57"; // matches the sw.js cache number
+const APP_VERSION = "58"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -2321,6 +2332,7 @@ function openIssueSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
+        ${clarifyControlsHtml("i", state)}
         ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("i-retr", !!state.translation, state.note) + listenBarHtml(state.note, state.translation, state.translationLang, "f-note")}
         <div class="field">
           <label>Trade</label>
@@ -2374,6 +2386,7 @@ function openIssueSheet(projectId) {
     $("f-title")?.addEventListener("input", (e) => { state.title = e.target.value; state.titleTouched = true; });
     $("f-title-lang")?.addEventListener("change", (e) => changeTitleLang(e.target.value));
     $("i-retr")?.addEventListener("click", () => runTranslate(true));
+    wireClarify("i", state, draw, () => runTranslate());
     $("i-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
     $("f-trade")?.addEventListener("change", (e) => { state.trade = e.target.value; state.tradeTouched = true; });
     $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; state.noteTouched = true; });
@@ -4010,6 +4023,51 @@ async function tryTranslate(text, force = false, previous = "") {
   }
 }
 
+// ✨ Make it easy to understand, on the New Issue / Material / Inspection
+// screens (v58). Those screens redraw from `state`, so the text before the
+// rewrite is kept in state.beforeClarify (Undo survives a redraw).
+function clarifyControlsHtml(prefix, state) {
+  if (!aiConfigured()) return "";
+  return `<div style="display:flex; gap:8px; margin:-4px 0 10px;">
+      <button class="btn ghost" id="${prefix}-clarify" style="flex:1;" ${state.clarifying ? "disabled" : ""}>${state.clarifying ? "✨ Rewriting…" : "✨ Make it easy to understand"}</button>
+      ${state.beforeClarify != null ? `<button class="btn ghost" id="${prefix}-undo" style="flex:none;">Undo</button>` : ""}
+    </div>`;
+}
+
+// `redraw` is the screen's own draw(); `retranslate` redoes the translation
+// for the new text (it redraws too).
+function wireClarify(prefix, state, redraw, retranslate) {
+  document.getElementById(`${prefix}-clarify`)?.addEventListener("click", async () => {
+    const current = String(state.note || "").trim();
+    if (!current) {
+      toast("There's no text to rewrite yet — type or dictate the note first");
+      return;
+    }
+    state.clarifying = true;
+    redraw();
+    try {
+      const clear = await withTimeout(clarifyNote(current), 45000, "no answer after 45 seconds");
+      state.beforeClarify = state.note;
+      state.note = clear;
+      state.noteTouched = true;
+      toast("Check the new text — tap Undo to go back", 4000);
+    } catch (err) {
+      logError("AI make it clear", err);
+      toast(`Couldn't rewrite it: ${errorText(err)}`, 6000);
+    } finally {
+      state.clarifying = false;
+    }
+    if (state.beforeClarify != null && state.note !== state.beforeClarify) retranslate();
+    else redraw();
+  });
+  document.getElementById(`${prefix}-undo`)?.addEventListener("click", () => {
+    if (state.beforeClarify == null) return;
+    state.note = state.beforeClarify;
+    state.beforeClarify = null;
+    retranslate();
+  });
+}
+
 // "Translate again" button for a screen that shows a note. Shown whenever
 // there is a note and an API key (also when no translation exists yet, e.g.
 // the switch was off or the first try failed).
@@ -4160,6 +4218,7 @@ function openMaterialSheet(projectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="f-note" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what you said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
+        ${clarifyControlsHtml("m", state)}
         ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("m-retr", !!state.translation, state.note) + listenBarHtml(state.note, state.translation, state.translationLang, "f-note")}
       `
         : "";
@@ -4193,6 +4252,7 @@ function openMaterialSheet(projectId) {
     $("m-stop")?.addEventListener("click", stopRecording);
     $("m-ai")?.addEventListener("click", runIdentify);
     $("m-retr")?.addEventListener("click", () => runTranslate(true));
+    wireClarify("m", state, draw, () => runTranslate());
     $("m-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
     $("m-save")?.addEventListener("click", save);
     // Keep state in sync as the user types, so redraws never lose edits. The
@@ -4690,6 +4750,7 @@ async function openInspectionSheet(preProjectId) {
           <label>Note · ${escapeHtml(issueStamp(state.voice.startedAt))}</label>
           <textarea id="in-note" rows="9" placeholder="${state.voice.transcript ? "" : "Couldn't transcribe this voice note — type what was said (optional)"}">${escapeHtml(state.note)}</textarea>
         </div>
+        ${clarifyControlsHtml("in", state)}
         ${state.translating ? `<p class="empty" style="text-align:left;">🌐 AI is translating the note…</p>` : translationCardHtml(state.translation, state.translationLang) + retranslateButtonHtml("in-retr", !!state.translation, state.note) + listenBarHtml(state.note, state.translation, state.translationLang, "in-note")}
         ${state.analyzing ? `<p class="empty" style="text-align:left;">🤖 AI is writing up the note and naming the inspection…</p>` : ""}
         ${state.aiNote ? `<p class="empty" style="text-align:left;">${escapeHtml(state.aiNote)}</p>` : ""}
@@ -4755,6 +4816,7 @@ async function openInspectionSheet(preProjectId) {
     $("in-gallery")?.addEventListener("click", () => takePhoto(true));
     $("in-ai")?.addEventListener("click", runAnalysis);
     $("in-retr")?.addEventListener("click", () => runTranslate(true));
+    wireClarify("in", state, draw, () => runTranslate());
     $("in-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
     $("in-title-lang")?.addEventListener("change", (e) => changeTitleLang(e.target.value));
     $("in-save")?.addEventListener("click", () => save(false));

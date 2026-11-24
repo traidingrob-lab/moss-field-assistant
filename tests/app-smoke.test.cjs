@@ -266,6 +266,64 @@ async function go(w, hash) {
   check('al volver a editar se puede ver "What was originally said"', () => assert.match(doc.getElementById("sheet").textContent, /What was originally said[\s\S]*cambiar tres tubos/));
   w.closeSheet();
 
+  // ---- v58: botón ✨ Make clear directo en la lista de notas de voz ----
+  await db.captures.add({ projectId: "p-del", type: "voice", dataUrl: "data:audio/mp4;base64,AAAA", transcript: ORIGINAL + " otra" });
+  await go(w, "#/project/p-del");
+  await sleep(300);
+  const direct = doc.querySelector("[data-clarify-voice]");
+  check("la lista de notas de voz muestra ✨ Make clear al lado de Edit text", () => assert.ok(direct, "no aparece el botón"));
+  if (direct) {
+    direct.dispatchEvent(new w.Event("click"));
+    await sleep(400);
+    check("✨ Make clear abre Edit text con el texto ya reescrito", () => {
+      assert.ok(doc.getElementById("ve-text"));
+      assert.strictEqual(doc.getElementById("ve-text").value, CLEAR);
+    });
+    w.closeSheet();
+  }
+
+  // ---- v58: ✨ en las pantallas de crear nota (New Issue / Material / Inspección) ----
+  const host = doc.createElement("div");
+  doc.body.appendChild(host);
+  const st = { note: ORIGINAL };
+  let retranslated = 0;
+  const redraw = () => {
+    host.innerHTML = w.clarifyControlsHtml("t", st);
+    w.wireClarify("t", st, redraw, () => { retranslated++; redraw(); });
+  };
+  redraw();
+  check("la pantalla de crear nota tiene el botón ✨ (sin Undo todavía)", () => {
+    assert.ok(doc.getElementById("t-clarify"));
+    assert.strictEqual(doc.getElementById("t-undo"), null);
+  });
+  doc.getElementById("t-clarify").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  check("✨ reescribe la nota, guarda la anterior y rehace la traducción", () => {
+    assert.strictEqual(st.note, CLEAR);
+    assert.strictEqual(st.beforeClarify, ORIGINAL);
+    assert.strictEqual(retranslated, 1);
+    assert.ok(doc.getElementById("t-undo"), "debe aparecer Undo");
+  });
+  doc.getElementById("t-undo").dispatchEvent(new w.Event("click"));
+  check("Undo devuelve la nota original y la vuelve a traducir", () => {
+    assert.strictEqual(st.note, ORIGINAL);
+    assert.strictEqual(st.beforeClarify, null);
+    assert.strictEqual(retranslated, 2);
+  });
+  st.note = "  ";
+  redraw();
+  doc.getElementById("t-clarify").dispatchEvent(new w.Event("click"));
+  await sleep(50);
+  check("si la nota está vacía, avisa en lugar de llamar a la IA", () => assert.match(toastText(), /no text to rewrite/));
+  // Las tres pantallas reales tienen su botón y su conexión.
+  check("New Issue, Material e Inspección incluyen el botón ✨", () => {
+    const src = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
+    for (const p of ["i", "m", "in"]) {
+      assert.match(src, new RegExp(`clarifyControlsHtml\\("${p}", state\\)`));
+      assert.match(src, new RegExp(`wireClarify\\("${p}", state, draw`));
+    }
+  });
+
 
   let failed = 0;
   for (const [pass, name] of results) {
