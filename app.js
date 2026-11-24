@@ -24,10 +24,67 @@ function escapeHtml(str) {
   }[c]));
 }
 
-function toast(msg) {
+let toastTimer = null;
+// `ms`: how long it stays up. Problems use a longer time so they can be read.
+function toast(msg, ms = 1800) {
   $toast.textContent = msg;
   $toast.classList.add("show");
-  setTimeout(() => $toast.classList.remove("show"), 1800);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $toast.classList.remove("show"), ms);
+}
+
+// ---------- Problem log (v55) ----------
+// Failures that used to be silent (or only in the console, which can't be
+// seen on an iPhone) are kept here — last 25 — and listed in Settings ▸
+// Recent problems, so they can be screenshotted and diagnosed.
+const ERROR_LOG_KEY = "moss_error_log";
+
+function errorText(err) {
+  if (!err) return "unknown error";
+  const name = err.name && err.name !== "Error" ? `${err.name}: ` : "";
+  return (name + (err.message || String(err))).slice(0, 300);
+}
+
+function errorLogEntries() {
+  try {
+    const list = JSON.parse(localStorage.getItem(ERROR_LOG_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function logError(where, err) {
+  try {
+    const list = errorLogEntries();
+    list.push({ t: Date.now(), where: String(where), msg: errorText(err) });
+    localStorage.setItem(ERROR_LOG_KEY, JSON.stringify(list.slice(-25)));
+  } catch {
+    // storage full or unavailable — nothing more we can do
+  }
+}
+
+function clearErrorLog() {
+  try {
+    localStorage.removeItem(ERROR_LOG_KEY);
+  } catch {}
+}
+
+window.addEventListener("error", (e) => logError("app", e.error || e.message));
+window.addEventListener("unhandledrejection", (e) => logError("app (async)", e.reason));
+
+// Opens a camera / file picker. The <input> is put into the page (hidden)
+// while it's open: an input that only exists in memory can be thrown away by
+// iPhone Safari while the camera app is in front, and then the photo it
+// returns is silently lost. Old pickers (e.g. a cancelled one) are removed
+// the next time one opens.
+function openFilePicker(input) {
+  document.querySelectorAll("input[data-moss-picker]").forEach((el) => el.remove());
+  input.dataset.mossPicker = "1";
+  input.style.cssText = "position:fixed; left:-9999px; top:0; width:1px; height:1px; opacity:0;";
+  input.addEventListener("change", () => setTimeout(() => input.remove(), 0), { once: true });
+  document.body.appendChild(input);
+  input.click();
 }
 
 // If a sheet is open and gets cancelled (backdrop tap, or the user
@@ -1428,7 +1485,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "54"; // matches the sw.js cache number
+const APP_VERSION = "55"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1599,7 +1656,20 @@ async function renderSettings() {
       </div>
       <div class="row">
         <span class="icon">💾</span>
-        <span class="main"><span class="title">Phone storage</span><span class="desc" id="storage-info">Checking…</span></span>
+        <span class="main"><span class="title">Phone storage</span><span class="desc" id="storage-info">Checking…</span><span class="desc" id="storage-moss">Counting Moss data…</span></span>
+      </div>
+      <div class="row" style="flex-direction:column; align-items:stretch; gap:6px;">
+        <span class="main"><span class="icon">🩺</span> <span class="title">Recent problems</span><span class="desc">If something doesn't work, take a screenshot of this list</span></span>
+        <div id="error-log" style="font-size:13px; white-space:pre-wrap; word-break:break-word;">${
+          errorLogEntries().length
+            ? errorLogEntries()
+                .slice()
+                .reverse()
+                .map((e) => escapeHtml(`${new Date(e.t).toLocaleString()} · ${e.where}: ${e.msg}`))
+                .join("\n")
+            : "No problems recorded"
+        }</div>
+        ${errorLogEntries().length ? `<button class="btn ghost" id="error-log-clear" style="align-self:flex-start; padding:6px 12px; font-size:13px;">Clear list</button>` : ""}
       </div>
       <div class="row" style="flex-direction:column; align-items:stretch; gap:8px;">
         <span class="main"><span class="icon">🎙️</span> <span class="title">Voice note language</span><span class="desc">What language you dictate voice notes in, for transcription</span></span>
@@ -1703,6 +1773,26 @@ async function renderSettings() {
       el.textContent = "Not available on this browser";
     }
   })();
+
+  // What Moss itself stores (works even where the browser won't say).
+  (async () => {
+    const el = document.getElementById("storage-moss");
+    if (!el) return;
+    try {
+      const caps = await withTimeout(MossDB.captures.all(), 15000, "counting took too long");
+      const photos = caps.filter((c) => c.type === "photo");
+      const bytes = caps.reduce((n, c) => n + (c.dataUrl ? c.dataUrl.length : 0), 0);
+      el.textContent = `Moss data: ${photos.length} photos, ${caps.length - photos.length} other items · about ${Math.round(bytes / 1048576)} MB`;
+    } catch (err) {
+      logError("storage count", err);
+      el.textContent = `Couldn't read Moss data: ${errorText(err)}`;
+    }
+  })();
+
+  document.getElementById("error-log-clear")?.addEventListener("click", () => {
+    clearErrorLog();
+    renderSettings();
+  });
   document.getElementById("f-voice-lang").addEventListener("change", (e) => {
     setVoiceLang(e.target.value);
     toast("Voice note language saved");
@@ -1817,8 +1907,20 @@ function capturePhoto(projectId) {
   input.capture = "environment";
   input.addEventListener("change", async () => {
     const file = input.files[0];
-    if (!file) return;
-    const dataUrl = await photoFileToDataUrl(file);
+    if (!file) {
+      logError("photo", new Error("the camera returned no photo"));
+      toast("No photo came back from the camera — try again", 5000);
+      return;
+    }
+    toast("Saving photo…", 30000);
+    let dataUrl;
+    try {
+      dataUrl = await withTimeout(photoFileToDataUrl(file), 30000, "reading the photo took too long");
+    } catch (err) {
+      logError(`photo read (${file.type || "no type"}, ${Math.round((file.size || 0) / 1024)} KB)`, err);
+      toast(`Couldn't read the photo: ${errorText(err)}`, 8000);
+      return;
+    }
     // Recorded once and reused for both the OneDrive upload and the local
     // record, so another device can later ask OneDrive for this exact file
     // by name (see hydrateRemoteCapture) — relying on file.name alone
@@ -1829,7 +1931,13 @@ function capturePhoto(projectId) {
       capture = await MossDB.captures.add({ projectId, type: "photo", dataUrl, name: file.name, remoteFileName });
     } catch (err) {
       console.error("Saving photo failed", err);
-      toast("Couldn't save the photo — the phone may be out of space");
+      logError(`photo save (${Math.round(dataUrl.length / 1024)} KB)`, err);
+      toast(
+        err && err.name === "QuotaExceededError"
+          ? "Couldn't save the photo — Moss is out of space on this phone"
+          : `Couldn't save the photo: ${errorText(err)}`,
+        8000
+      );
       return;
     }
     toast("Photo saved");
@@ -1854,12 +1962,16 @@ function capturePhoto(projectId) {
       ? captionPhoto(dataUrl)
           .then((caption) => caption && MossDB.captures.update(capture.id, { caption }))
           .then(() => { if (currentRoute().name === "project") render(); })
-          .catch((err) => console.warn("Photo captioning skipped:", err.message))
+          .catch((err) => {
+            console.warn("Photo captioning skipped:", err.message);
+            logError("AI photo description", err);
+            toast(`AI description failed: ${errorText(err)}`, 6000);
+          })
       : Promise.resolve();
 
     Promise.all([uploadPromise, captionPromise]).then(() => syncCapturesWithOneDrive());
   });
-  input.click();
+  openFilePicker(input);
 }
 
 function captureDocument(projectId) {
@@ -1874,7 +1986,7 @@ function captureDocument(projectId) {
     if (currentRoute().name === "project") render();
     syncCaptureToOneDrive(projectId, "document", file, file.name);
   });
-  input.click();
+  openFilePicker(input);
 }
 
 async function captureVoice(projectId) {
@@ -2256,7 +2368,7 @@ function openIssueSheet(projectId) {
       draw();
       if (state.voice) runAnalysis(); // photo replaced after the note was recorded
     });
-    input.click();
+    openFilePicker(input);
   };
 
   // Gallery: pick several photos at once (up to 5 per issue in total). If
@@ -2290,7 +2402,7 @@ function openIssueSheet(projectId) {
       draw();
       if (newMain && state.voice) runAnalysis();
     });
-    input.click();
+    openFilePicker(input);
   };
 
   const startRecording = async () => {
@@ -4035,7 +4147,7 @@ function openMaterialSheet(projectId) {
       // lookup. Otherwise wait for the voice note (step 2).
       if (state.voice) runIdentify();
     });
-    input.click();
+    openFilePicker(input);
   };
 
   // ONE AI call that combines the photo and the voice-note transcript.
@@ -4591,7 +4703,7 @@ async function openInspectionSheet(preProjectId) {
       state.photos.push({ dataUrl, file });
       draw();
     });
-    input.click();
+    openFilePicker(input);
   };
 
   const startRecording = async () => {

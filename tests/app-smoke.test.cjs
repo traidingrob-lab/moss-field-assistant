@@ -87,8 +87,15 @@ async function go(w, hash) {
     check(`la pantalla ${name} se dibuja`, () => assert.ok(doc.getElementById("app").innerHTML.length > 100));
   }
 
+  const APP_VERSION = /APP_VERSION = "(\d+)"/.exec(fs.readFileSync(path.join(ROOT, "app.js"), "utf8"))[1];
   await go(w, "#/settings");
-  check("Settings muestra la versión 54", () => assert.match(doc.getElementById("app").textContent, /App version\s*54/));
+  check(`Settings muestra la versión ${APP_VERSION}`, () =>
+    assert.match(doc.getElementById("app").textContent, new RegExp("App version\\s*" + APP_VERSION))
+  );
+  check("Settings muestra cuánto ocupa Moss y la lista de problemas", () => {
+    assert.match(doc.getElementById("storage-moss").textContent, /Moss data: \d+ photos/);
+    assert.match(doc.getElementById("error-log").textContent, /No problems recorded/);
+  });
   const sw = doc.getElementById("f-ai-economy");
   check("Settings tiene el interruptor Economy AI, encendido por defecto", () => {
     assert.ok(sw, "no existe #f-ai-economy");
@@ -114,9 +121,77 @@ async function go(w, hash) {
     assert.strictEqual(a, c);
   });
 
+  // ---- Tomar una foto (v55): el selector queda dentro de la página y la foto se guarda ----
+  const toastText = () => doc.getElementById("toast").textContent;
+  const photoFile = () => new w.File([new Uint8Array(2048).fill(7)], "IMG_0001.JPG", { type: "image/jpeg" });
+  w.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ content: [{ type: "text", text: "Drywall hung in kitchen." }], stop_reason: "end_turn" }),
+    text: async () => "",
+    clone() { return this; }
+  });
+
+  const pickAndSend = async (file) => {
+    w.capturePhoto("proj-test");
+    const input = doc.querySelector("input[data-moss-picker]");
+    if (!input) return null;
+    Object.defineProperty(input, "files", { value: file ? [file] : [] });
+    input.dispatchEvent(new w.Event("change"));
+    return input;
+  };
+
+  const picker = await pickAndSend(photoFile());
+  check("el selector de cámara queda dentro de la página (arreglo iPhone)", () => assert.ok(picker, "no se encontró el input en la página"));
+  await sleep(600);
+  check("después de elegir la foto, el selector se quita de la página", () =>
+    assert.strictEqual(doc.querySelector("input[data-moss-picker]"), null)
+  );
+  check('al tomar una foto aparece "Photo saved"', () => assert.match(toastText(), /Photo saved/));
+  const saved = (await w.eval("MossDB").captures.all()).filter((c) => c.projectId === "proj-test" && c.type === "photo");
+  check("la foto queda guardada en la base de datos", () => assert.strictEqual(saved.length, 1));
+  await sleep(4800); // la descripción espera hasta 4 s a que la imagen se reduzca
+  const savedAfter = (await w.eval("MossDB").captures.all()).find((c) => c.projectId === "proj-test");
+  check("la descripción de la IA se guarda en la foto", () => assert.strictEqual(savedAfter && savedAfter.caption, "Drywall hung in kitchen."));
+
   check("sin errores de JavaScript al usar la app", () => {
     const real = errors.filter((e) => !/MSAL|msal/i.test(String(e && (e.stack || e))));
     assert.deepStrictEqual(real.map((e) => String(e && (e.stack || e)).split("\n")[0]), []);
+  });
+
+  // ---- Fallas: ahora se ven en pantalla y quedan en la lista ----
+  w.fetch = async () => ({ ok: false, status: 529, text: async () => '{"error":{"message":"Overloaded"}}', clone() { return this; } });
+  await pickAndSend(photoFile());
+  await sleep(5200);
+  check("si la IA falla, se avisa en pantalla y queda en la lista", () => {
+    assert.match(toastText(), /AI description failed: .*529/);
+    assert.ok(w.errorLogEntries().some((e) => e.where === "AI photo description"));
+  });
+
+  const realAdd = w.eval("MossDB").captures.add;
+  w.eval("MossDB").captures.add = async () => {
+    const e = new Error("The quota has been exceeded.");
+    e.name = "QuotaExceededError";
+    throw e;
+  };
+  await pickAndSend(photoFile());
+  await sleep(600);
+  w.eval("MossDB").captures.add = realAdd;
+  check("si el teléfono no tiene espacio, lo dice claramente y queda en la lista", () => {
+    assert.match(toastText(), /out of space/);
+    assert.ok(w.errorLogEntries().some((e) => /^photo save/.test(e.where) && /QuotaExceededError/.test(e.msg)));
+  });
+
+  await pickAndSend(null);
+  await sleep(200);
+  check("si la cámara no devuelve foto, se avisa", () => assert.match(toastText(), /No photo came back/));
+
+  await go(w, "#/projects");
+  await go(w, "#/settings");
+  check("Settings ▸ Recent problems muestra los problemas", () => {
+    const t = doc.getElementById("error-log").textContent;
+    assert.match(t, /QuotaExceededError/);
+    assert.match(t, /AI photo description/);
   });
 
   let failed = 0;
