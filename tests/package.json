@@ -1,0 +1,9 @@
+{
+  "name": "moss-tests",
+  "private": true,
+  "type": "commonjs",
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.8",
+    "jsdom": "^31.0.1"
+  }
+}

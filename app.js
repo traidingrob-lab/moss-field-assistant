@@ -1428,7 +1428,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "53"; // matches the sw.js cache number
+const APP_VERSION = "54"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1580,6 +1580,15 @@ async function renderSettings() {
         <input type="checkbox" class="switch" id="f-ai-translate" ${aiTranslateEnabled() ? "checked" : ""} ${aiConfigured() ? "" : "disabled"} aria-label="AI translate voice notes">
       </div>
       <div class="row">
+        <span class="icon">💲</span>
+        <span class="main"><span class="title">Economy AI</span><span class="desc">${
+          aiEconomyEnabled()
+            ? "On — photo descriptions, translations and issue titles use the cheaper, faster model (Haiku)"
+            : "Off — everything uses the stronger model (Sonnet)"
+        }</span></span>
+        <input type="checkbox" class="switch" id="f-ai-economy" ${aiEconomyEnabled() ? "checked" : ""} aria-label="Economy AI">
+      </div>
+      <div class="row">
         <span class="icon">ℹ️</span>
         <span class="main"><span class="title">App version</span><span class="desc">${APP_VERSION}</span></span>
       </div>
@@ -1671,6 +1680,12 @@ async function renderSettings() {
   document.getElementById("f-ai-translate").addEventListener("change", (e) => {
     setAiTranslate(e.target.checked);
     toast(e.target.checked ? "AI voice note translation on" : "AI voice note translation off");
+    renderSettings();
+  });
+
+  document.getElementById("f-ai-economy").addEventListener("change", (e) => {
+    setAiEconomy(e.target.checked);
+    toast(e.target.checked ? "Economy AI on" : "Economy AI off");
     renderSettings();
   });
 

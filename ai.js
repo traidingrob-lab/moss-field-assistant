@@ -15,7 +15,48 @@
 // never be made public with a key already saved in it.
 
 const AI_KEY_STORAGE = "moss_anthropic_api_key";
-const AI_MODEL = "claude-sonnet-5";
+
+// Two models (v54):
+//   AI_MODEL      — Claude Sonnet 5.5, for work that needs judgment: Ask AI,
+//                   weekly reports, inspections and materials (web search).
+//   AI_MODEL_FAST — Claude Haiku 5.5, much cheaper and faster, for the
+//                   repetitive jobs: photo descriptions, voice note
+//                   translations, issue titles and the New Issue analysis.
+// Settings ▸ "Economy AI" turns the fast model off (everything on Sonnet).
+const AI_MODEL = "claude-sonnet-5-5";
+const AI_MODEL_FAST = "claude-haiku-5-5";
+const AI_ECONOMY_STORAGE = "moss_ai_economy";
+
+function aiEconomyEnabled() {
+  try {
+    return localStorage.getItem(AI_ECONOMY_STORAGE) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function setAiEconomy(enabled) {
+  try {
+    if (enabled) localStorage.removeItem(AI_ECONOMY_STORAGE);
+    else localStorage.setItem(AI_ECONOMY_STORAGE, "off");
+  } catch {
+    // localStorage unavailable — the switch just won't stick; harmless.
+  }
+}
+
+// These models think before answering, and that thinking counts against
+// max_tokens. Callers pass the budget for the VISIBLE answer; this headroom
+// is added on top so a long think can't eat the answer (which used to give
+// cut-off or empty replies). Lower effort = less thinking = cheaper/faster.
+const THINKING_HEADROOM = { low: 2000, medium: 4000, high: 8000 };
+const MAX_TOKENS_CAP = 16000;
+
+// Sonnet only: if Claude declines a request for safety reasons, the API
+// re-runs it on another suitable model instead of returning nothing.
+// (Haiku 5.5 has no server-side fallback.) If the API ever rejects the
+// option, it's switched off for the rest of the session and retried without.
+const FALLBACK_BETA = "server-side-fallback-2026-07-01";
+let aiFallbacksSupported = true;
 
 function aiKey() {
   try {
@@ -92,23 +133,63 @@ function setAiKey(key) {
 // optional (used for web search). Returns the whole response object. Errors
 // carry `.status` (HTTP status) so callers can tell "web search isn't
 // enabled for this key's organization" (400) from a bad key (401), etc.
-async function callClaudeFull(messages, maxTokens = 1024, tools) {
+// `opts.tier`: "fast" uses Haiku when Economy AI is on; anything else Sonnet.
+// `opts.effort`: "low" | "medium" | "high" (default: low on Haiku, medium on Sonnet).
+async function callClaudeFull(messages, maxTokens = 1024, tools, opts = {}) {
   const key = aiKey();
   if (!key) throw new Error("No Claude API key set — add one in Settings first.");
 
-  const body = { model: AI_MODEL, max_tokens: maxTokens, messages };
+  const useFast = opts.tier === "fast" && aiEconomyEnabled();
+  const effort = opts.effort || (useFast ? "low" : "medium");
+  const body = {
+    model: useFast ? AI_MODEL_FAST : AI_MODEL,
+    max_tokens: Math.min(MAX_TOKENS_CAP, maxTokens + (THINKING_HEADROOM[effort] || THINKING_HEADROOM.medium)),
+    output_config: { effort },
+    messages
+  };
   if (tools) body.tools = tools;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true"
-    },
-    body: JSON.stringify(body)
-  });
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true"
+  };
+  const useFallbacks = !useFast && aiFallbacksSupported;
+  if (useFallbacks) {
+    body.fallbacks = "default";
+    headers["anthropic-beta"] = FALLBACK_BETA;
+  }
+
+  const post = () =>
+    fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body: JSON.stringify(body) });
+
+  const dropFallbacks = () => {
+    aiFallbacksSupported = false;
+    delete body.fallbacks;
+    delete headers["anthropic-beta"];
+  };
+
+  let res;
+  try {
+    res = await post();
+  } catch (err) {
+    // If the browser blocked the request because of the extra beta header,
+    // it fails as a network error (not a 400): retry once without it.
+    if (!useFallbacks) throw err;
+    dropFallbacks();
+    res = await post();
+  }
+
+  // The refusal-fallback option is a beta: if the API rejects it, drop it
+  // for this session and send the same request again without it.
+  if (!res.ok && res.status === 400 && useFallbacks) {
+    const text = await res.clone().text().catch(() => "");
+    if (/fallback|beta/i.test(text)) {
+      dropFallbacks();
+      res = await post();
+    }
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -128,15 +209,27 @@ async function callClaudeFull(messages, maxTokens = 1024, tools) {
     throw err;
   }
 
-  return res.json();
+  const data = await res.json();
+  // A safety decline comes back as a normal reply with no usable text.
+  if (data.stop_reason === "refusal") {
+    const err = new Error("Claude declined to process this one — try rewording it.");
+    err.status = 200;
+    err.refusal = true;
+    throw err;
+  }
+  return data;
 }
 
 // `content` is either a plain string (text-only) or an array of Claude
 // content blocks (e.g. an image block + a text block), per the Messages API.
-// Returns the reply as plain text.
-async function callClaude(content, maxTokens = 1024) {
-  const data = await callClaudeFull([{ role: "user", content }], maxTokens);
-  return (data.content || []).map((block) => block.text || "").join("").trim();
+// Returns the reply as plain text (thinking blocks carry no text, so they
+// drop out here).
+async function callClaude(content, maxTokens = 1024, opts = {}) {
+  const data = await callClaudeFull([{ role: "user", content }], maxTokens, undefined, opts);
+  return (data.content || [])
+    .map((block) => (block.type === "text" ? block.text || "" : ""))
+    .join("")
+    .trim();
 }
 
 // Sends one question to Claude along with whatever project context the
@@ -156,7 +249,11 @@ async function askClaude(prompt) {
 // swallowed by the caller so a captioning problem never blocks saving the
 // photo itself.
 async function captionPhoto(dataUrl) {
-  const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || "");
+  // A one-sentence description doesn't need full resolution: 1024px is
+  // plenty, much cheaper, and keeps big iPhone photos under the API's 5 MB
+  // per-image limit (the photo used to be sent at full size).
+  const small = await downscaleImageForAI(dataUrl, 1024);
+  const match = /^data:([^;]+);base64,(.*)$/.exec(small || "");
   if (!match) throw new Error("Invalid image data.");
   const [, mediaType, base64Data] = match;
   const prompt =
@@ -167,7 +264,8 @@ async function captionPhoto(dataUrl) {
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
       { type: "text", text: prompt }
     ],
-    150
+    150,
+    { tier: "fast", effort: "low" }
   );
 }
 
@@ -285,7 +383,8 @@ async function translateIssueTitle(title, lang) {
     `Write this short construction job-site issue title in ${target}. If it is already in ${target}, return it unchanged. ` +
       "Use natural trade terms, keep names, numbers and measurements exactly, max 8 words, no quotes, no explanation. " +
       `Reply with ONLY the title.\nTitle: ${t}`,
-    120
+    120,
+    { tier: "fast", effort: "low" }
   );
   const out = reply.split("\n")[0].replace(/^["'“”]+|["'“”]+$/g, "").trim();
   if (!out) throw new Error("AI reply wasn't readable.");
@@ -319,7 +418,8 @@ async function analyzeIssueCapture(dataUrl, transcript, trades, titleLang = "en"
       { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
       { type: "text", text: prompt }
     ],
-    Math.min(6000, Math.max(700, Math.ceil(spoken.length / 2) + 500))
+    Math.min(6000, Math.max(700, Math.ceil(spoken.length / 2) + 500)),
+    { tier: "fast", effort: "low" }
   );
 
   const start = text.indexOf("{");
@@ -371,12 +471,12 @@ function hostnameOf(url) {
 // answers "pause_turn"; the paused reply is sent back to let it continue.
 // Returns { data, urls } — the final response plus the pages it cited (or,
 // failing that, the pages the search returned), as hostnames.
-async function runWithSearch(messages, maxTokens, tools) {
+async function runWithSearch(messages, maxTokens, tools, opts = {}) {
   let msgs = messages.slice();
   const cited = [];
   const found = [];
   for (let turn = 0; turn < 4; turn++) {
-    const data = await callClaudeFull(msgs, maxTokens, tools);
+    const data = await callClaudeFull(msgs, maxTokens, tools, opts);
     for (const block of data.content || []) {
       if (block.type === "web_search_tool_result" && Array.isArray(block.content)) {
         for (const r of block.content) if (r && r.url) found.push(hostnameOf(r.url));
@@ -516,7 +616,10 @@ async function translateVoiceNote(text, previous = "") {
     `Voice note:\n"""${t}"""\n` +
     'Reply with ONLY a JSON object: {"language": "es" or "en" or "other" (the language of the original), "translation": "<the translation>"}';
   // Long notes (an inspection can run for minutes) need a bigger answer budget.
-  const reply = await callClaude(prompt, Math.min(8000, Math.max(1000, Math.ceil(t.length / 2) + 500)));
+  const reply = await callClaude(prompt, Math.min(8000, Math.max(1000, Math.ceil(t.length / 2) + 500)), {
+    tier: "fast",
+    effort: "low"
+  });
   const parsed = parseJsonReply(reply);
   if (!parsed || typeof parsed.translation !== "string") throw new Error("AI reply wasn't readable.");
   const translation = parsed.translation.trim();
@@ -552,7 +655,11 @@ async function analyzeInspectionCapture(photoDataUrls, transcript, titleLang = "
     `Write the title in ${lang} (always, whatever language the note is in).`;
   content.push({ type: "text", text: prompt });
 
-  const text = await callClaude(content, Math.min(8000, Math.max(700, Math.ceil(spoken.length / 2) + 500)));
+  // Inspections stay on Sonnet (they can be long and matter more), but at
+  // low effort: it's a title plus a word-for-word note, not open reasoning.
+  const text = await callClaude(content, Math.min(8000, Math.max(700, Math.ceil(spoken.length / 2) + 500)), {
+    effort: "low"
+  });
   const parsed = parseJsonReply(text);
   if (!parsed) throw new Error("AI reply wasn't readable.");
   const str = (v) => (typeof v === "string" ? v.trim() : "");
