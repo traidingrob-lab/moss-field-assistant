@@ -224,6 +224,49 @@ async function go(w, hash) {
     assert.ok(w.errorLogEntries().some((e) => e.where === "AI translation" && /model not found/.test(e.msg)));
   });
 
+  const db = w.eval("MossDB");
+  await db.projects.add({ id: "p-del", name: "Mafakhame" });
+  // ---- v57: ✨ Make it easy to understand en una nota de voz ----
+  const ORIGINAL = "eh cambiar tres tubos de media pulgada en la cocina y la fuga del baño revisar";
+  const CLEAR = "- Cambiar 3 tubos de 1/2 pulgada en la cocina.\n- Revisar la fuga del baño.";
+  const voice = await db.captures.add({ projectId: "p-del", type: "voice", dataUrl: "data:audio/mp4;base64,AAAA", transcript: ORIGINAL });
+  const voiceRec = await db.captures.get ? await db.captures.get(voice) : (await db.captures.all()).find((c) => c.transcript === ORIGINAL);
+  const v = voiceRec || (await db.captures.all()).find((c) => c.transcript === ORIGINAL);
+  const asked = [];
+  w.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    asked.push(body.messages[0].content);
+    const isTranslate = /Translate this construction/.test(body.messages[0].content);
+    const text = isTranslate ? '{"language":"es","translation":"- Replace 3 half-inch pipes in the kitchen.\\n- Check the bathroom leak."}' : CLEAR;
+    return { ok: true, status: 200, json: async () => ({ content: [{ type: "text", text }], stop_reason: "end_turn" }), text: async () => "", clone() { return this; } };
+  };
+  w.openVoiceEditSheet(v);
+  await sleep(100);
+  check("Edit text tiene el botón ✨ Make it easy to understand", () => assert.ok(doc.getElementById("ve-clarify")));
+  doc.getElementById("ve-clarify").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  check("✨ pone el texto claro en el cuadro (sin guardar todavía)", () => {
+    assert.strictEqual(doc.getElementById("ve-text").value, CLEAR);
+    assert.notStrictEqual(doc.getElementById("ve-undo").style.display, "none");
+  });
+  doc.getElementById("ve-undo").dispatchEvent(new w.Event("click"));
+  check("Undo devuelve el texto original", () => assert.strictEqual(doc.getElementById("ve-text").value, ORIGINAL));
+  doc.getElementById("ve-clarify").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  doc.getElementById("ve-save").dispatchEvent(new w.Event("click"));
+  await sleep(400);
+  const savedVoice = (await db.captures.all()).find((c) => c.id === v.id);
+  check("al guardar: texto claro, se conserva lo que se dijo y se traduce de nuevo", () => {
+    assert.strictEqual(savedVoice.transcript, CLEAR);
+    assert.strictEqual(savedVoice.originalTranscript, ORIGINAL);
+    assert.match(savedVoice.translation, /Replace 3 half-inch pipes/);
+  });
+  w.openVoiceEditSheet(savedVoice);
+  await sleep(100);
+  check('al volver a editar se puede ver "What was originally said"', () => assert.match(doc.getElementById("sheet").textContent, /What was originally said[\s\S]*cambiar tres tubos/));
+  w.closeSheet();
+
+
   let failed = 0;
   for (const [pass, name] of results) {
     if (!pass) failed++;

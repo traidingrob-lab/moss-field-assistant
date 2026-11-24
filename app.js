@@ -1489,7 +1489,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "56"; // matches the sw.js cache number
+const APP_VERSION = "57"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -3567,6 +3567,19 @@ function openVoiceEditSheet(v) {
     <div class="field"><label>Written version</label>
       <textarea id="ve-text" rows="9" style="min-height:220px; line-height:1.5;">${escapeHtml(v.transcript || "")}</textarea>
     </div>
+    ${
+      aiConfigured()
+        ? `<div style="display:flex; gap:8px; margin:-4px 0 10px;">
+      <button class="btn ghost" id="ve-clarify" style="flex:1;">✨ Make it easy to understand</button>
+      <button class="btn ghost" id="ve-undo" style="flex:none; display:none;">Undo</button>
+    </div>`
+        : ""
+    }
+    ${
+      v.originalTranscript && v.originalTranscript !== v.transcript
+        ? `<details style="margin:0 0 10px;"><summary class="desc" style="cursor:pointer;">What was originally said</summary><p style="white-space:pre-wrap; font-size:14px; margin:6px 0 0;">${escapeHtml(v.originalTranscript)}</p></details>`
+        : ""
+    }
     <p class="empty" style="text-align:left; margin-top:-4px;">${aiConfigured() ? "The translation will be made again from your corrected text." : "The old translation will be removed because it no longer matches."}</p>
     <div class="sheet-actions">
       <button class="btn ghost" id="ve-cancel">Cancel</button>
@@ -3574,6 +3587,42 @@ function openVoiceEditSheet(v) {
     </div>
   `);
   document.getElementById("ve-cancel").addEventListener("click", closeSheet);
+
+  // ✨ Make it easy to understand: the AI version goes into the box so it
+  // can be checked/edited before Save; Undo puts back what was there.
+  let beforeClarify = null;
+  const $clarify = document.getElementById("ve-clarify");
+  const $undo = document.getElementById("ve-undo");
+  $clarify?.addEventListener("click", async () => {
+    const $text = document.getElementById("ve-text");
+    const current = $text.value.trim();
+    if (!current) {
+      toast("There's no text to rewrite yet");
+      return;
+    }
+    const label = $clarify.textContent;
+    $clarify.disabled = true;
+    $clarify.textContent = "✨ Rewriting…";
+    try {
+      const clear = await withTimeout(clarifyNote(current), 45000, "no answer after 45 seconds");
+      beforeClarify = $text.value;
+      $text.value = clear;
+      if ($undo) $undo.style.display = "";
+      toast("Check the new text, then tap Save", 4000);
+    } catch (err) {
+      logError("AI make it clear", err);
+      toast(`Couldn't rewrite it: ${errorText(err)}`, 6000);
+    } finally {
+      $clarify.disabled = false;
+      $clarify.textContent = label;
+    }
+  });
+  $undo?.addEventListener("click", () => {
+    if (beforeClarify !== null) document.getElementById("ve-text").value = beforeClarify;
+    beforeClarify = null;
+    $undo.style.display = "none";
+  });
+
   document.getElementById("ve-save").addEventListener("click", async () => {
     const text = document.getElementById("ve-text").value.trim();
     const btn = document.getElementById("ve-save");
@@ -3587,6 +3636,9 @@ function openVoiceEditSheet(v) {
     }
     btn.disabled = true;
     btn.textContent = "Saving…";
+    // Keep what was originally dictated the first time the text changes, so a
+    // rewrite (by hand or by ✨) never loses what was actually said.
+    const original = v.originalTranscript || String(v.transcript || "").trim();
     let patch = { transcript: text, translation: "", translationLang: "" };
     if (aiConfigured()) {
       try {
@@ -3594,6 +3646,7 @@ function openVoiceEditSheet(v) {
         if (tr) patch = { transcript: text, translation: tr.translation, translationLang: tr.target };
       } catch {}
     }
+    if (original) patch.originalTranscript = original;
     try {
       await MossDB.captures.update(v.id, patch);
       Object.assign(v, patch);

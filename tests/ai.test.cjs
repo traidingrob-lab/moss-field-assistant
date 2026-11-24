@@ -58,7 +58,7 @@ function loadAi({ economy = true, responses = [] } = {}) {
   };
   vm.createContext(ctx);
   const src = fs.readFileSync(path.join(__dirname, "..", "ai.js"), "utf8");
-  vm.runInContext(src + "\n;this.__ai = { callClaude, askClaude, captionPhoto, translateVoiceNote, translateIssueTitle, analyzeIssueCapture, analyzeInspectionCapture, identifyMaterial, aiEconomyEnabled, setAiEconomy, aiSelfTest, callClaudeFull };", ctx);
+  vm.runInContext(src + "\n;this.__ai = { callClaude, askClaude, captionPhoto, translateVoiceNote, translateIssueTitle, analyzeIssueCapture, analyzeInspectionCapture, identifyMaterial, aiEconomyEnabled, setAiEconomy, aiSelfTest, callClaudeFull, clarifyNote };", ctx);
   return { ai: ctx.__ai, calls, store };
 }
 
@@ -251,6 +251,26 @@ test("Test AI usa el modelo pedido aunque Economy esté apagado", async () => {
   const { ai, calls } = loadAi({ economy: false, responses: [ok("OK"), ok("OK")] });
   await ai.aiSelfTest();
   assert.strictEqual(calls[0].body.model, "claude-haiku-5-5");
+});
+
+test("✨ Make it easy to understand usa Haiku, pide conservar datos y devuelve el texto limpio", async () => {
+  const { ai, calls } = loadAi({ responses: [ok('"- Cambiar 3 tubos de 1/2 pulgada en la cocina.\n- Revisar la fuga del baño."')] });
+  const out = await ai.clarifyNote("eh cambiar tres tubos de media pulgada en la cocina y la fuga del baño revisar");
+  assert.strictEqual(out, "- Cambiar 3 tubos de 1/2 pulgada en la cocina.\n- Revisar la fuga del baño.");
+  const b = calls[0].body;
+  assert.strictEqual(b.model, "claude-haiku-5-5");
+  assert.deepStrictEqual(b.output_config, { effort: "low" });
+  const prompt = b.messages[0].content;
+  assert.match(prompt, /SAME language/);
+  assert.match(prompt, /Keep EVERY fact/);
+  assert.match(prompt, /cambiar tres tubos/);
+});
+
+test("✨ con texto vacío no llama a la IA; respuesta vacía da error", async () => {
+  const { ai, calls } = loadAi({ responses: [ok("")] });
+  assert.strictEqual(await ai.clarifyNote("   "), "");
+  assert.strictEqual(calls.length, 0);
+  await assert.rejects(ai.clarifyNote("algo"), /empty/);
 });
 
 test("el interruptor Economy se guarda y se lee", async () => {

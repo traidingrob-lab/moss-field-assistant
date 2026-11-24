@@ -684,6 +684,32 @@ async function translateVoiceNote(text, previous = "") {
 }
 
 
+// "✨ Make it easy to understand" (v57): rewrites a dictated note so it reads
+// clearly — fixed grammar and punctuation, short sentences, a list when it
+// names several tasks — in the SAME language, keeping every fact, number,
+// measurement and name. The person sees it before saving, can undo it, and
+// the original transcript is kept on the record.
+async function clarifyNote(text) {
+  const t = String(text || "").trim();
+  if (!t) return "";
+  const prompt =
+    "Rewrite this construction job-site voice note so it is easy to understand for the crew and the client.\n" +
+    "Rules:\n" +
+    "- Write it in the SAME language as the note (if it mixes Spanish and English, use the main one and keep trade terms as said).\n" +
+    "- Fix grammar, punctuation and obvious speech-recognition mistakes; use short, clear sentences.\n" +
+    "- If it lists several tasks, problems or materials, put each on its own line starting with \"- \".\n" +
+    "- Keep EVERY fact: all numbers, measurements, quantities, names, places, brands and dates exactly. " +
+    "Do not add anything that was not said, do not give advice, do not summarize away details.\n" +
+    "- Reply with ONLY the rewritten note — no title, no quotes, no explanation.\n" +
+    `Note:\n"""${t}"""`;
+  const out = await callClaude(prompt, Math.min(8000, Math.max(600, Math.ceil(t.length / 2) + 400)), {
+    tier: "fast",
+    effort: "low"
+  });
+  if (!out) throw new Error("AI reply was empty.");
+  return out.replace(/^["“]+|["”]+$/g, "").trim();
+}
+
 // Inspection log: the contractor dictated a note while walking an inspection
 // with the inspector (optionally with photos). Returns { title, note }: a
 // short title naming the inspection (type + area) and the note word for word
