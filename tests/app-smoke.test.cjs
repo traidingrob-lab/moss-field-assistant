@@ -368,6 +368,99 @@ async function go(w, hash) {
     assert.match(w.location.hash, /#\/project\/p-del/)
   );
 
+  // ---- v61: lista de tareas (en lugar del botón Document) ----
+  await go(w, "#/project/p-del");
+  check("el botón Tasks reemplaza a Document", () => {
+    assert.ok(doc.querySelector('[data-capture="task"]'), "falta el botón Tasks");
+    assert.ok(!doc.querySelector('[data-capture="document"]'), "Document sigue ahí");
+  });
+  doc.querySelector('[data-capture="task"]').dispatchEvent(new w.Event("click"));
+  await sleep(200);
+  check("Tasks abre la lista vacía del proyecto", () => assert.match(doc.getElementById("sheet").textContent, /Tasks · Mafakhame[\s\S]*No tasks yet/));
+  doc.getElementById("tl-new").dispatchEvent(new w.Event("click"));
+  await sleep(50);
+  const fNote = doc.getElementById("f-note");
+  fNote.value = "Cambiar la llave del baño";
+  fNote.dispatchEvent(new w.Event("input"));
+  doc.querySelector('[data-prio="red"]').dispatchEvent(new w.Event("click"));
+  await sleep(20);
+  check("la tarea muestra los 3 colores y ✨ Make it easy to understand", () => {
+    assert.strictEqual(doc.querySelectorAll("[data-prio]").length, 3);
+    assert.ok(doc.getElementById("t-clarify"));
+    assert.strictEqual(doc.getElementById("f-note").value, "Cambiar la llave del baño", "el texto se pierde al cambiar color");
+  });
+  doc.getElementById("t-save").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  const taskList = async () => (await db.captures.forProject("p-del")).filter((c) => c.type === "task");
+  let savedTask = (await taskList())[0];
+  check("Save guarda la tarea en rojo (urgente)", () => {
+    assert.ok(savedTask, "no se guardó");
+    assert.strictEqual(savedTask.priority, "red");
+    assert.strictEqual(savedTask.text, "Cambiar la llave del baño");
+    assert.match(doc.getElementById("sheet").textContent, /Cambiar la llave del baño[\s\S]*Urgent/);
+  });
+  await db.captures.add({ projectId: "p-del", type: "task", text: "Pintar la cerca", priority: "green" });
+  await db.captures.add({ projectId: "p-del", type: "task", text: "Pedir azulejo", priority: "yellow" });
+  w.eval("openTaskListSheet('p-del')");
+  await sleep(200);
+  check("la lista va en orden: rojo, amarillo, verde", () => {
+    const titles = [...doc.querySelectorAll("[data-task-id] .title")].map((e) => e.textContent);
+    assert.deepStrictEqual(titles, ["Cambiar la llave del baño", "Pedir azulejo", "Pintar la cerca"]);
+  });
+  doc.querySelector(`[data-task-done="${savedTask.id}"]`).dispatchEvent(new w.Event("click", { bubbles: true }));
+  await sleep(300);
+  savedTask = (await taskList()).find((t) => t.id === savedTask.id);
+  check("✓ marca la tarea como hecha y la pasa al final", () => {
+    assert.strictEqual(savedTask.done, true);
+    const titles = [...doc.querySelectorAll("[data-task-id] .title")].map((e) => e.textContent);
+    assert.strictEqual(titles[2], "Cambiar la llave del baño");
+  });
+
+  w.localStorage.removeItem("moss_anthropic_api_key"); // sin IA: el mensaje sale tal cual
+  doc.getElementById("tl-share").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  check("Send the list as text arma el mensaje por colores (solo pendientes)", () => {
+    const msg = doc.getElementById("sh-text").value;
+    assert.match(msg, /Tasks: Mafakhame/);
+    assert.match(msg, /SOON\n- Pedir azulejo/);
+    assert.match(msg, /CAN WAIT\n- Pintar la cerca/);
+    assert.ok(!/llave/.test(msg), "no debe incluir la tarea hecha");
+  });
+  w.localStorage.setItem("moss_anthropic_api_key", "sk-ant-test");
+
+  w.eval("openTaskListSheet('p-del')");
+  await sleep(200);
+  const greenRow = [...doc.querySelectorAll("[data-task-id]")].find((r) => /Pintar/.test(r.textContent));
+  greenRow.querySelector(".title").dispatchEvent(new w.Event("click", { bubbles: true }));
+  await sleep(50);
+  doc.querySelector('[data-prio="yellow"]').dispatchEvent(new w.Event("click"));
+  const fn2 = doc.getElementById("f-note");
+  fn2.value = "Pintar la cerca de blanco";
+  fn2.dispatchEvent(new w.Event("input"));
+  doc.getElementById("t-save").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  const edited = (await taskList()).find((t) => /Pintar/.test(t.text));
+  check("editar cambia el texto y el color sin crear otra tarea", () => {
+    assert.strictEqual(edited.text, "Pintar la cerca de blanco");
+    assert.strictEqual(edited.priority, "yellow");
+  });
+  const countBefore = (await taskList()).length;
+  check("siguen siendo 3 tareas", () => assert.strictEqual(countBefore, 3));
+  w.eval("openTaskListSheet('p-del')");
+  await sleep(200);
+  [...doc.querySelectorAll("[data-task-id]")].find((r) => /Pintar/.test(r.textContent)).dispatchEvent(new w.Event("click"));
+  await sleep(50);
+  doc.getElementById("t-delete").dispatchEvent(new w.Event("click"));
+  await sleep(20);
+  doc.getElementById("td-confirm").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  const after = await taskList();
+  check("🗑 Delete task borra solo esa tarea", () => {
+    assert.strictEqual(after.length, countBefore - 1);
+    assert.ok(!after.some((t) => /Pintar/.test(t.text)));
+    assert.match(toastText(), /Task deleted/);
+  });
+
 
   let failed = 0;
   for (const [pass, name] of results) {

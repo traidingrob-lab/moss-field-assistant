@@ -306,7 +306,7 @@ async function renderHome() {
         <button class="tile-btn" data-capture="photo"><span class="emoji">📸</span><span class="label">Photo</span></button>
         <button class="tile-btn" data-capture="voice"><span class="emoji">🎤</span><span class="label">Voice Note</span></button>
         <button class="tile-btn" data-capture="issue"><span class="emoji">📋</span><span class="label">New Issue</span></button>
-        <button class="tile-btn" data-capture="document"><span class="emoji">📄</span><span class="label">Document</span></button>
+        <button class="tile-btn" data-capture="task"><span class="emoji">✅</span><span class="label">Tasks</span></button>
         <button class="tile-btn" data-capture="material"><span class="emoji">📦</span><span class="label">Material</span></button>
         <button class="tile-btn" data-capture="inspection"><span class="emoji">🏛️</span><span class="label">Inspection</span></button>
       </div>
@@ -479,7 +479,9 @@ async function backupToOneDrive(onProgress = () => {}) {
         materials: caps.filter((c) => c.type === "material").map(light),
         inspections: caps.filter((c) => c.type === "inspection").map(light),
         voiceNotes: caps.filter((c) => c.type === "voice").map(light),
-        photos: caps.filter((c) => c.type === "photo").map(light)
+        photos: caps.filter((c) => c.type === "photo").map(light),
+        // Tasks: the text and colour (their photos / voice note stay on the phone).
+        tasks: caps.filter((c) => c.type === "task").map(({ photos, voice, ...t }) => ({ ...t, photoCount: (photos || []).length, hasVoiceNote: !!voice }))
       };
       await uploadProjectDataFile(p.name, "moss-data.json", JSON.stringify(data, null, 2), token);
       result.projects++;
@@ -1022,7 +1024,7 @@ async function renderDashboard(id) {
         <button class="tile-btn" data-capture="photo"><span class="emoji">📸</span><span class="label">Photo</span></button>
         <button class="tile-btn" data-capture="voice"><span class="emoji">🎤</span><span class="label">Voice Note</span></button>
         <button class="tile-btn" data-capture="issue"><span class="emoji">📋</span><span class="label">New Issue</span></button>
-        <button class="tile-btn" data-capture="document"><span class="emoji">📄</span><span class="label">Document</span></button>
+        <button class="tile-btn" data-capture="task"><span class="emoji">✅</span><span class="label">Tasks</span></button>
         <button class="tile-btn" data-capture="material"><span class="emoji">📦</span><span class="label">Material</span></button>
         <button class="tile-btn" data-capture="inspection"><span class="emoji">🏛️</span><span class="label">Inspection</span></button>
       </div>
@@ -1439,6 +1441,10 @@ async function buildAIContext() {
         lines.push(`- Inspection [${inspectionResultInfo(i.result).short || "?"}]: ${i.name}${i.inspector ? ` (inspector ${i.inspector})` : ""}${i.comments ? ` — ${i.comments}` : ""}`);
       }
 
+      for (const t of sortTasks(captures.filter((c) => c.type === "task" && !c.done)).slice(0, 20)) {
+        lines.push(`- Task to do [${taskPriority(t.priority).label}]: ${taskHeadline(t)}`);
+      }
+
       const described = captures.filter((c) => c.caption || c.transcript);
       for (const c of described.slice(-15)) {
         const when = new Date(c.createdAt).toLocaleDateString();
@@ -1511,7 +1517,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "60"; // matches the sw.js cache number
+const APP_VERSION = "61"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -1835,7 +1841,7 @@ async function renderSettings() {
     try {
       const caps = await withTimeout(MossDB.captures.all(), 15000, "counting took too long");
       const photos = caps.filter((c) => c.type === "photo");
-      const bytes = caps.reduce((n, c) => n + (c.dataUrl ? c.dataUrl.length : 0), 0);
+      const bytes = caps.reduce((n, c) => n + (c.dataUrl ? c.dataUrl.length : 0) + (c.photos || []).reduce((k, u) => k + String(u).length, 0) + (c.voice && c.voice.dataUrl ? c.voice.dataUrl.length : 0), 0);
       el.textContent = `Moss data: ${photos.length} photos, ${caps.length - photos.length} other items · about ${Math.round(bytes / 1048576)} MB`;
     } catch (err) {
       logError("storage count", err);
@@ -1947,7 +1953,7 @@ function wireQuickCapture() {
       if (!projectId) return;
       if (type === "photo") capturePhoto(projectId);
       else if (type === "voice") captureVoice(projectId);
-      else if (type === "document") captureDocument(projectId);
+      else if (type === "task") openTaskListSheet(projectId);
       else if (type === "issue") openIssueSheet(projectId);
       else if (type === "material") openMaterialSheet(projectId);
     });
@@ -2024,21 +2030,6 @@ function capturePhoto(projectId) {
       : Promise.resolve();
 
     Promise.all([uploadPromise, captionPromise]).then(() => syncCapturesWithOneDrive());
-  });
-  openFilePicker(input);
-}
-
-function captureDocument(projectId) {
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = ".pdf,.doc,.docx,.png,.jpg,.jpeg,image/*,application/pdf";
-  input.addEventListener("change", async () => {
-    const file = input.files[0];
-    if (!file) return;
-    await MossDB.captures.add({ projectId, type: "document", name: file.name, size: file.size });
-    toast(`Saved "${file.name}"`);
-    if (currentRoute().name === "project") render();
-    syncCaptureToOneDrive(projectId, "document", file, file.name);
   });
   openFilePicker(input);
 }
@@ -4157,6 +4148,422 @@ function wireRetranslate(id, noteText, previous, apply, done) {
     toast("Translation updated");
     done();
     syncCapturesWithOneDrive();
+  });
+}
+
+// ---------- Tasks (v61): a to-do list per project ----------
+// Each task is a capture of type "task" holding its own text, colour
+// (green = can wait, yellow = soon, red = urgent), photos (data URLs) and an
+// optional voice note. Tasks stay on this phone (not synced, like
+// materials); they are deleted outright.
+
+const TASK_PRIORITIES = [
+  { id: "red", label: "Urgent", es: "Urgente", color: "#DC2626", mark: "🔴" },
+  { id: "yellow", label: "Soon", es: "Pronto", color: "#D97706", mark: "🟡" },
+  { id: "green", label: "Can wait", es: "Puede esperar", color: "#16A34A", mark: "🟢" }
+];
+const MAX_TASK_PHOTOS = 5;
+const taskPriority = (id) => TASK_PRIORITIES.find((p) => p.id === id) || TASK_PRIORITIES[1];
+const taskDot = (p, size = 14) =>
+  `<span aria-hidden="true" style="display:inline-block; width:${size}px; height:${size}px; border-radius:50%; background:${p.color}; flex:none; vertical-align:middle;"></span>`;
+
+function taskHeadline(t) {
+  const first = String(t.text || "")
+    .split("\n")
+    .map((l) => l.replace(/^\s*[-•*]\s*/, "").trim())
+    .find(Boolean);
+  if (first) return first.length > 90 ? first.slice(0, 88) + "…" : first;
+  return (t.photos || []).length ? "Task with photo" : t.voice ? "Voice task" : "Task";
+}
+
+// Open tasks first (red, yellow, green), then finished ones; oldest first within each.
+function sortTasks(list) {
+  const rank = { red: 0, yellow: 1, green: 2 };
+  return [...list].sort(
+    (a, b) =>
+      (a.done ? 1 : 0) - (b.done ? 1 : 0) ||
+      (rank[taskPriority(a.priority).id] - rank[taskPriority(b.priority).id]) ||
+      String(a.createdAt || "").localeCompare(String(b.createdAt || ""))
+  );
+}
+
+async function loadTasks(projectId) {
+  return sortTasks((await MossDB.captures.forProject(projectId)).filter((c) => c.type === "task"));
+}
+
+async function openTaskListSheet(projectId) {
+  let tasks, project;
+  try {
+    [tasks, project] = await Promise.all([loadTasks(projectId), MossDB.projects.get(projectId)]);
+  } catch (err) {
+    logError("open tasks", err);
+    toast(`Couldn't open the tasks: ${errorText(err)}`, 6000);
+    return;
+  }
+  const open = tasks.filter((t) => !t.done);
+  const urgent = open.filter((t) => taskPriority(t.priority).id === "red").length;
+  const rows = tasks
+    .map((t) => {
+      const p = taskPriority(t.priority);
+      const n = (t.photos || []).length;
+      return `
+      <div class="row" data-task-id="${escapeHtml(t.id)}" style="cursor:pointer; ${t.done ? "opacity:.55;" : ""}">
+        <button class="btn ghost" data-task-done="${escapeHtml(t.id)}" aria-label="${t.done ? "Mark as not done" : "Mark as done"}" style="flex:none; width:34px; height:34px; padding:0; border-radius:8px; font-size:17px; line-height:1;">${t.done ? "✓" : ""}</button>
+        <span style="flex:none; display:flex; align-items:center;">${taskDot(p)}</span>
+        <span class="main"><span class="title" style="${t.done ? "text-decoration:line-through;" : ""}">${escapeHtml(taskHeadline(t))}</span><span class="desc">${t.done ? "Done" : p.label}${n ? ` · 📷 ${n}` : ""}${t.voice ? " · 🎤" : ""}</span></span>
+        <span class="chev">›</span>
+      </div>`;
+    })
+    .join("");
+  openSheet(`
+    <h2>✅ Tasks${project ? " · " + escapeHtml(project.name) : ""}</h2>
+    <span class="desc">${open.length} to do${urgent ? ` · ${urgent} urgent` : ""}${tasks.length > open.length ? ` · ${tasks.length - open.length} done` : ""}</span>
+    <button class="btn primary" id="tl-new" style="width:100%;">+ New task</button>
+    <div class="card card-list">${rows || `<div class="row"><span class="empty">No tasks yet — add the first one.</span></div>`}</div>
+    ${open.length ? `<button class="btn ghost" id="tl-share" style="width:100%;">💬 Send the list as text</button>` : ""}
+    ${closeButton()}
+  `);
+  wireCloseButton();
+  document.getElementById("tl-new").addEventListener("click", () => openTaskEditSheet(projectId, null));
+  document.getElementById("tl-share")?.addEventListener("click", () => openTaskShareSheet(project, open));
+  $sheet.querySelectorAll("[data-task-id]").forEach((row) =>
+    row.addEventListener("click", async (e) => {
+      const t = tasks.find((x) => x.id === row.dataset.taskId);
+      if (!t) return;
+      if (e.target.closest("[data-task-done]")) {
+        try {
+          await MossDB.captures.update(t.id, { done: !t.done, doneAt: t.done ? null : new Date().toISOString(), updatedAt: new Date().toISOString() });
+        } catch (err) {
+          logError("task done", err);
+          toast(`Couldn't save: ${errorText(err)}`, 6000);
+          return;
+        }
+        toast(t.done ? "Back on the list" : "Done ✓");
+        openTaskListSheet(projectId);
+        return;
+      }
+      openTaskEditSheet(projectId, t);
+    })
+  );
+}
+
+// New task (task = null) or edit an existing one.
+function openTaskEditSheet(projectId, task) {
+  const state = {
+    note: task ? String(task.text || "") : "", // "note" so the shared ✨ Make-it-clear helpers work on it
+    priority: task ? taskPriority(task.priority).id : "yellow",
+    done: !!(task && task.done),
+    photos: task ? [...(task.photos || [])] : [], // data URLs
+    voice: task && task.voice ? { ...task.voice } : null, // { dataUrl, mimeType, startedAt }
+    recorder: null,
+    recording: false,
+    clarifying: false,
+    beforeClarify: null,
+    saving: false
+  };
+  let closed = false;
+
+  // Release the microphone however the sheet goes away.
+  const cleanup = () => {
+    closed = true;
+    if (state.recorder) {
+      state.recorder.cancel();
+      state.recorder = null;
+    }
+    state.recording = false;
+  };
+  const busy = () => state.recording || state.clarifying || state.saving;
+
+  const draw = () => {
+    if (closed) return;
+    const prio = TASK_PRIORITIES.map((p) => {
+      const on = state.priority === p.id;
+      return `<button class="btn ${on ? "primary" : "ghost"}" data-prio="${p.id}" ${state.saving ? "disabled" : ""} style="flex:1; padding:10px 4px; font-size:13px; display:flex; align-items:center; justify-content:center; gap:6px; ${on ? `background:${p.color}; border-color:${p.color}; color:#fff;` : ""}">${taskDot(p, 12)}${p.label}</button>`;
+    }).join("");
+
+    let voiceBlock;
+    if (state.recording) {
+      voiceBlock = `
+        <div class="rec-indicator"><span class="dot"></span><span>Recording… say what needs to be done</span></div>
+        <button class="btn primary" id="t-stop">⏹ Stop recording</button>`;
+    } else if (state.voice) {
+      voiceBlock = `
+        <audio controls preload="metadata" style="width:100%; height:36px;" src="${state.voice.dataUrl}"></audio>
+        ${voiceLangPickerHtml("t-vlang", busy())}
+        <div style="display:flex; gap:8px;">
+          <button class="btn ghost" id="t-rec" ${busy() ? "disabled" : ""} style="flex:1;">🎤 Record again</button>
+          <button class="btn ghost" id="t-rmvoice" ${busy() ? "disabled" : ""} style="flex:none;">✕ Remove</button>
+        </div>`;
+    } else {
+      voiceBlock = `${voiceLangPickerHtml("t-vlang", busy())}<button class="btn ghost" id="t-rec" ${busy() ? "disabled" : ""}>🎤 Record voice note</button>`;
+    }
+
+    const full = state.photos.length >= MAX_TASK_PHOTOS;
+    const photoBlock = `
+      ${
+        state.photos.length
+          ? `<div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;">${state.photos
+              .map(
+                (u, i) => `<div style="position:relative;"><img src="${u}" alt="Task photo ${i + 1}" style="width:72px; height:72px; object-fit:cover; border-radius:10px; display:block;"><button class="btn ghost" data-rm-photo="${i}" ${busy() ? "disabled" : ""} style="position:absolute; top:-6px; right:-6px; width:26px; height:26px; padding:0; border-radius:50%; font-size:13px; line-height:1;" aria-label="Remove photo">✕</button></div>`
+              )
+              .join("")}</div>`
+          : ""
+      }
+      <div style="display:flex; gap:8px;">
+        <button class="btn ghost" id="t-photo" ${busy() || full ? "disabled" : ""} style="flex:1;">📸 Take photo</button>
+        <button class="btn ghost" id="t-gallery" ${busy() || full ? "disabled" : ""} style="flex:1;">🖼 Gallery</button>
+      </div>
+      <span class="desc">${state.photos.length}/${MAX_TASK_PHOTOS} photos</span>`;
+
+    $sheet.innerHTML = `
+      <h2>${task ? "Edit task" : "New task"}</h2>
+      <div class="field"><label>How urgent?</label><div style="display:flex; gap:6px;">${prio}</div></div>
+      <div class="field"><label>What needs to be done</label>
+        <textarea id="f-note" rows="5" placeholder="Type it here, or record a voice note below">${escapeHtml(state.note)}</textarea>
+      </div>
+      ${clarifyControlsHtml("t", state)}
+      <div class="field"><label>Voice note (optional)</label>${voiceBlock}</div>
+      <div class="field"><label>Photos (optional)</label>${photoBlock}</div>
+      ${
+        task
+          ? `<label style="display:flex; gap:10px; align-items:center; font-size:15px; margin:4px 0 10px;"><input type="checkbox" id="t-done" ${state.done ? "checked" : ""} ${state.saving ? "disabled" : ""} style="width:22px; height:22px;"> Done</label>
+        <button class="btn ghost" id="t-share" ${busy() ? "disabled" : ""} style="width:100%;">💬 Send this task as text</button>
+        <button class="btn ghost" id="t-delete" ${busy() ? "disabled" : ""} style="width:100%; color:var(--red, #DC2626);">🗑 Delete task</button>`
+          : ""
+      }
+      <div class="sheet-actions">
+        <button class="btn ghost" id="t-cancel">${task ? "Back" : "Cancel"}</button>
+        <button class="btn primary" id="t-save" ${busy() ? "disabled" : ""} style="${busy() ? "opacity:.5;" : ""}">${state.saving ? "Saving…" : "Save task"}</button>
+      </div>`;
+    wire();
+  };
+
+  const wire = () => {
+    const $ = (id) => document.getElementById(id);
+    $("t-cancel")?.addEventListener("click", () => {
+      cleanup();
+      openTaskListSheet(projectId);
+    });
+    $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; });
+    $sheet.querySelectorAll("[data-prio]").forEach((b) =>
+      b.addEventListener("click", () => {
+        state.priority = b.dataset.prio;
+        draw();
+      })
+    );
+    wireClarify("t", state, draw, draw);
+    $("t-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
+    $("t-rec")?.addEventListener("click", startRecording);
+    $("t-stop")?.addEventListener("click", stopRecording);
+    $("t-rmvoice")?.addEventListener("click", () => {
+      state.voice = null;
+      draw();
+    });
+    $("t-photo")?.addEventListener("click", () => addPhotos(false));
+    $("t-gallery")?.addEventListener("click", () => addPhotos(true));
+    $sheet.querySelectorAll("[data-rm-photo]").forEach((b) =>
+      b.addEventListener("click", () => {
+        state.photos.splice(Number(b.dataset.rmPhoto), 1);
+        draw();
+      })
+    );
+    $("t-done")?.addEventListener("change", (e) => { state.done = e.target.checked; });
+    $("t-share")?.addEventListener("click", async () => {
+      cleanup();
+      const project = await MossDB.projects.get(projectId);
+      openTaskShareSheet(project, [task]);
+    });
+    $("t-delete")?.addEventListener("click", () => {
+      cleanup();
+      confirmTaskDelete(projectId, task);
+    });
+    $("t-save")?.addEventListener("click", save);
+  };
+
+  const addPhotos = (fromGallery) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    if (fromGallery) input.multiple = true;
+    else input.capture = "environment";
+    input.addEventListener("change", async () => {
+      const files = [...(input.files || [])];
+      if (!files.length || closed) return;
+      const room = MAX_TASK_PHOTOS - state.photos.length;
+      if (files.length > room) toast(`Only ${MAX_TASK_PHOTOS} photos per task`);
+      for (const file of files.slice(0, Math.max(0, room))) {
+        try {
+          const url = await withTimeout(photoFileToDataUrl(file), 30000, "reading the photo took too long");
+          if (closed) return;
+          state.photos.push(url);
+        } catch (err) {
+          logError("task photo", err);
+          toast(`Couldn't read the photo: ${errorText(err)}`, 6000);
+        }
+      }
+      draw();
+    });
+    openFilePicker(input);
+  };
+
+  const startRecording = async () => {
+    let rec;
+    try {
+      rec = await startVoiceRecorder();
+    } catch (err) {
+      toast(err.message === "Microphone not available in this browser" ? err.message : "Microphone permission denied");
+      return;
+    }
+    if (closed) {
+      rec.cancel();
+      return;
+    }
+    state.recorder = rec;
+    state.recording = true;
+    draw();
+  };
+
+  const stopRecording = async () => {
+    const rec = state.recorder;
+    if (!rec) return;
+    state.recorder = null;
+    const stopBtn = document.getElementById("t-stop");
+    if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = "Finishing…"; }
+    let result = null;
+    try {
+      result = await rec.stop();
+    } catch (err) {
+      logError("task voice note", err);
+    }
+    state.recording = false;
+    if (closed) return;
+    if (!result) {
+      toast("Nothing was recorded — try again");
+      draw();
+      return;
+    }
+    state.voice = { dataUrl: result.dataUrl, mimeType: result.mimeType, startedAt: result.startedAt.toISOString() };
+    if (result.transcript) {
+      // What was said is added to the text (kept editable).
+      state.note = state.note.trim() ? `${state.note.trim()}\n${result.transcript}` : result.transcript;
+    } else {
+      toast("The voice note was saved, but it couldn't be written down — type the task if you want text", 5000);
+    }
+    draw();
+  };
+
+  const save = async () => {
+    if (busy()) return;
+    const text = state.note.trim();
+    if (!text && !state.photos.length && !state.voice) {
+      toast("Write the task, record it, or add a photo first");
+      return;
+    }
+    state.saving = true;
+    draw();
+    const now = new Date().toISOString();
+    const record = {
+      ...(task || {}),
+      projectId,
+      type: "task",
+      text,
+      priority: state.priority,
+      done: state.done,
+      doneAt: state.done ? (task && task.done && task.doneAt) || now : null,
+      photos: state.photos,
+      voice: state.voice,
+      updatedAt: now
+    };
+    try {
+      await MossDB.captures.add(record);
+    } catch (err) {
+      logError(`task save (${state.photos.length} photos)`, err);
+      toast(
+        err && err.name === "QuotaExceededError" ? "Couldn't save the task — Moss is out of space on this phone" : `Couldn't save the task: ${errorText(err)}`,
+        8000
+      );
+      state.saving = false;
+      draw();
+      return;
+    }
+    cleanup();
+    toast(task ? "Task updated" : "Task added");
+    openTaskListSheet(projectId);
+  };
+
+  openSheet("", cleanup);
+  draw();
+}
+
+function confirmTaskDelete(projectId, task) {
+  openSheet(`
+    <h2>Delete this task?</h2>
+    <p style="margin:0;">"${escapeHtml(taskHeadline(task))}"${(task.photos || []).length || task.voice ? " — with its photos and voice note" : ""}. This can't be undone.</p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="td-cancel">Cancel</button>
+      <button class="btn primary" id="td-confirm" style="background:var(--red, #DC2626); border-color:var(--red, #DC2626);">🗑 Delete</button>
+    </div>
+  `);
+  document.getElementById("td-cancel").addEventListener("click", () => openTaskEditSheet(projectId, task));
+  document.getElementById("td-confirm").addEventListener("click", async () => {
+    try {
+      await MossDB.captures.remove(task.id);
+    } catch (err) {
+      logError("task delete", err);
+      toast(`Couldn't delete: ${errorText(err)}`, 6000);
+      return;
+    }
+    toast("Task deleted");
+    openTaskListSheet(projectId);
+  });
+}
+
+// Text message: tasks grouped by colour; each task's text in the chosen
+// language (its AI translation when it was written in the other one).
+async function buildTaskMessage(project, tasks, lang) {
+  const es = lang === "es";
+  const textIn = async (note) => {
+    if (!note || !aiConfigured()) return note;
+    let hit = listenCache.get(note);
+    if (!hit) {
+      const r = await tryTranslate(note, true);
+      if (r) {
+        hit = { translation: r.translation, lang: r.target };
+        listenCache.set(note, hit);
+      }
+    }
+    return hit && hit.lang === lang ? hit.translation : note;
+  };
+  const lines = [`✅ ${es ? "Tareas" : "Tasks"}${project ? `: ${project.name}${project.address ? " — " + project.address : ""}` : ""}`];
+  for (const p of TASK_PRIORITIES) {
+    const group = sortTasks(tasks).filter((t) => taskPriority(t.priority).id === p.id);
+    if (!group.length) continue;
+    lines.push("", `${p.mark} ${(es ? p.es : p.label).toUpperCase()}`);
+    const texts = await Promise.all(group.map((t) => textIn(String(t.text || "").trim())));
+    group.forEach((t, i) => {
+      const body = texts[i] || taskHeadline(t);
+      const [first, ...rest] = body.split("\n").map((l) => l.trim()).filter(Boolean);
+      lines.push(`- ${(first || "").replace(/^[-•*]\s*/, "")}${t.done ? (es ? " (hecha)" : " (done)") : ""}`);
+      for (const l of rest) lines.push(`   ${l}`);
+    });
+  }
+  return lines.join("\n");
+}
+
+function openTaskShareSheet(project, tasks) {
+  const files = [];
+  for (const t of sortTasks(tasks)) {
+    for (const url of t.photos || []) {
+      if (files.length >= 10) break;
+      const type = (/^data:([^;,]+)/.exec(url) || [])[1] || "image/jpeg";
+      files.push({ url, name: `task-photo-${files.length + 1}.${/png/.test(type) ? "png" : "jpg"}`, type });
+    }
+  }
+  return openShareSheet({
+    build: (lang) => buildTaskMessage(project, tasks, lang),
+    fallback: `✅ Tasks\n` + tasks.map((t) => `- ${taskHeadline(t)}`).join("\n"),
+    files,
+    noun: "photo"
   });
 }
 
