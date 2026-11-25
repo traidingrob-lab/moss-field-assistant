@@ -899,7 +899,7 @@ async function renderProjectsList() {
 
 // ---------- Project menu: open / close each list ----------
 const SECTIONS_KEY = "moss_dash_sections";
-const SECTION_DEFAULTS = { completed: false, issues: true, inspections: true, materials: true };
+const SECTION_DEFAULTS = { tasks: true, issues: true, inspections: true, materials: true };
 
 function secOpen(name) {
   try {
@@ -953,6 +953,8 @@ async function renderDashboard(id) {
   }
   const issues = await MossDB.issues.forProject(id);
   const captures = await MossDB.captures.forProject(id);
+  const tasks = sortTasks(captures.filter((c) => c.type === "task"));
+  const openTasks = tasks.filter((t) => !t.done);
   // Newest first, so the compact view's single visible row is the latest one.
   const issueTime = (i) => String(i.recordedAt || i.createdAt || "");
   const openIssues = issues
@@ -1005,7 +1007,7 @@ async function renderDashboard(id) {
 
   const body = `
     <div class="stat-grid stat-grid-4">
-      <button class="stat-tile ${secOpen("completed") ? "on" : ""}" data-sec-toggle="completed" aria-expanded="${secOpen("completed")}"><span class="num" style="color:var(--green);">${issues.filter((i) => i.status === "Completed").length}</span><span class="label">COMPLETED</span></button>
+      <button class="stat-tile ${secOpen("tasks") ? "on" : ""}" data-sec-toggle="tasks" aria-expanded="${secOpen("tasks")}"><span class="num" style="color:${openTasks.some((t) => taskPriority(t.priority).id === "red") ? "var(--red, #DC2626)" : "var(--green)"};">${openTasks.length}</span><span class="label">TASKS</span></button>
       <button class="stat-tile warn ${secOpen("issues") ? "on" : ""}" data-sec-toggle="issues" aria-expanded="${secOpen("issues")}"><span class="num" style="color:var(--amber-deep);">${openIssues.length}</span><span class="label">OPEN ISSUES</span></button>
       <button class="stat-tile ${secOpen("inspections") ? "on" : ""}" data-sec-toggle="inspections" aria-expanded="${secOpen("inspections")}"><span class="num">${captures.filter((c) => c.type === "inspection").length}</span><span class="label">INSPECTIONS</span></button>
       <button class="stat-tile ${secOpen("materials") ? "on" : ""}" data-sec-toggle="materials" aria-expanded="${secOpen("materials")}"><span class="num">${materials.length}</span><span class="label">MATERIALS</span></button>
@@ -1055,24 +1057,24 @@ async function renderDashboard(id) {
       </div>
     </div>
 
-    <div data-sec="completed" class="${secOpen("completed") ? "" : "sec-collapsed"}">
-      <div class="section-label" data-sec-head="completed">Completed</div>
+    <div data-sec="tasks" class="${secOpen("tasks") ? "" : "sec-collapsed"}">
+      <div class="section-label" data-sec-head="tasks">Tasks${openTasks.length ? ` · ${openTasks.length}` : ""}<span><span class="link" data-quick="task-list">All ›</span><span class="link" data-quick="task" style="margin-left:14px;">+ Add</span></span></div>
       <div class="card card-list" style="margin-top:10px;">
         ${
-          issues.filter((i) => i.status === "Completed").length
-            ? issues
-                .filter((i) => i.status === "Completed")
-                .sort((a, b) => String(b.archivedAt || b.createdAt || "").localeCompare(String(a.archivedAt || a.createdAt || "")))
-                .map(
-                  (i) => `
-          <div class="row" data-issue-id="${escapeHtml(i.id)}" style="cursor:pointer;">
-            <span class="icon" style="color:var(--green);">✔</span>
-            <span class="main"><span class="title">${escapeHtml(i.title)}</span><span class="desc">${escapeHtml(i.trade)}${i.archivedAt ? " · fixed " + escapeHtml(new Date(i.archivedAt).toLocaleDateString()) : ""}</span></span>
+          openTasks.length
+            ? openTasks
+                .map((t) => {
+                  const p = taskPriority(t.priority);
+                  const n = (t.photos || []).length;
+                  return `
+          <div class="row" data-task-row="${escapeHtml(t.id)}" style="cursor:pointer;">
+            <span class="icon" style="display:flex; align-items:center; justify-content:center;">${taskDot(p)}</span>
+            <span class="main"><span class="title">${escapeHtml(taskHeadline(t))}</span><span class="desc">${p.label}${n ? ` · 📷 ${n}` : ""}${t.voice ? " · 🎤" : ""}</span></span>
             <span class="chev">›</span>
-          </div>`
-                )
+          </div>`;
+                })
                 .join("")
-            : `<div class="row"><span class="empty">Nothing fixed yet.</span></div>`
+            : `<div class="row"><span class="empty">${tasks.length ? "All tasks are done ✓" : "No tasks yet — tap + Add."}</span></div>`
         }
       </div>
     </div>
@@ -1234,6 +1236,14 @@ async function renderDashboard(id) {
 
   wireQuickCapture();
   $app.querySelector('[data-quick="issue"]').addEventListener("click", () => openIssueSheet(id));
+  $app.querySelector('[data-quick="task"]').addEventListener("click", () => openTaskEditSheet(id, null));
+  $app.querySelector('[data-quick="task-list"]').addEventListener("click", () => openTaskListSheet(id));
+  $app.querySelectorAll("[data-task-row]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const t = tasks.find((x) => x.id === el.dataset.taskRow);
+      if (t) openTaskEditSheet(id, t);
+    })
+  );
   $app.querySelector('[data-quick="issue-pdf"]').addEventListener("click", () => openIssuesPdfSheet(id));
   $app.querySelector('[data-quick="material"]').addEventListener("click", () => openMaterialSheet(id));
   $app.querySelector('[data-quick="material-pdf"]').addEventListener("click", () => openMaterialsPdfSheet(id));
@@ -1517,7 +1527,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "62"; // matches the sw.js cache number
+const APP_VERSION = "63"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4187,6 +4197,11 @@ function sortTasks(list) {
   );
 }
 
+// The project screen shows the task count and list: redraw it behind the sheet.
+function refreshAfterTaskChange() {
+  if (currentRoute().name === "project") render();
+}
+
 async function loadTasks(projectId) {
   return sortTasks((await MossDB.captures.forProject(projectId)).filter((c) => c.type === "task"));
 }
@@ -4239,6 +4254,7 @@ async function openTaskListSheet(projectId) {
           return;
         }
         toast(t.done ? "Back on the list" : "Done ✓");
+        refreshAfterTaskChange();
         openTaskListSheet(projectId);
         return;
       }
@@ -4554,6 +4570,7 @@ function openTaskEditSheet(projectId, task) {
     const stillOpen = !closed; // the sheet may have been closed while it was saving
     cleanup();
     toast(task ? "Task updated" : "Task added");
+    refreshAfterTaskChange();
     if (stillOpen) openTaskListSheet(projectId);
   };
 
@@ -4580,6 +4597,7 @@ function confirmTaskDelete(projectId, task) {
       return;
     }
     toast("Task deleted");
+    refreshAfterTaskChange();
     openTaskListSheet(projectId);
   });
 }

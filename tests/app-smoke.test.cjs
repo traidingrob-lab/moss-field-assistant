@@ -471,6 +471,18 @@ async function go(w, hash) {
   });
   const countBefore = (await taskList()).length;
   check("siguen siendo 3 tareas", () => assert.strictEqual(countBefore, 3));
+  await sleep(200);
+  check("v63: el cuadro TASKS reemplaza a COMPLETED y cuenta las pendientes", () => {
+    const tile = doc.querySelector('[data-sec-toggle="tasks"]');
+    assert.ok(tile, "falta el cuadro TASKS");
+    assert.ok(!doc.querySelector('[data-sec-toggle="completed"]'), "COMPLETED sigue ahí");
+    assert.strictEqual(tile.querySelector(".num").textContent, "2");
+  });
+  check("v63: la sección Tasks del proyecto lista las pendientes", () => {
+    const rows = [...doc.querySelectorAll("[data-task-row]")].map((r) => r.querySelector(".title").textContent);
+    // Las dos son amarillas y se crearon en el mismo milisegundo: el orden entre ellas no importa.
+    assert.deepStrictEqual(rows.sort(), ["Pedir azulejo", "Pintar la cerca de blanco"]);
+  });
   w.eval("openTaskListSheet('p-del')");
   await sleep(200);
   [...doc.querySelectorAll("[data-task-id]")].find((r) => /Pintar/.test(r.textContent)).dispatchEvent(new w.Event("click"));
