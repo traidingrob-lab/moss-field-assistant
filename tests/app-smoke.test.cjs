@@ -369,6 +369,12 @@ async function go(w, hash) {
   );
 
   // ---- v61: lista de tareas (en lugar del botón Document) ----
+  w.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    const isTranslate = /Translate this construction/.test(body.messages[0].content);
+    const text = isTranslate ? '{"language":"es","translation":"Change the bathroom faucet"}' : "ok";
+    return { ok: true, status: 200, json: async () => ({ content: [{ type: "text", text }], stop_reason: "end_turn" }), text: async () => "", clone() { return this; } };
+  };
   await go(w, "#/project/p-del");
   check("el botón Tasks reemplaza a Document", () => {
     assert.ok(doc.querySelector('[data-capture="task"]'), "falta el botón Tasks");
@@ -399,6 +405,25 @@ async function go(w, hash) {
     assert.strictEqual(savedTask.text, "Cambiar la llave del baño");
     assert.match(doc.getElementById("sheet").textContent, /Cambiar la llave del baño[\s\S]*Urgent/);
   });
+  check("v62: al guardar, la tarea se traduce y la traducción se guarda", () => {
+    assert.strictEqual(savedTask.translation, "Change the bathroom faucet");
+    assert.strictEqual(savedTask.translationLang, "en");
+    assert.strictEqual(savedTask.translatedFrom, "Cambiar la llave del baño");
+  });
+  w.eval("openTaskEditSheet")("p-del", savedTask);
+  await sleep(50);
+  check("v62: editar la tarea muestra la traducción y el botón 🌐", () => {
+    assert.match(doc.getElementById("sheet").textContent, /English translation[\s\S]*Change the bathroom faucet/);
+    assert.ok(doc.getElementById("t-retr"), "falta el botón Translate");
+  });
+  w.localStorage.removeItem("moss_anthropic_api_key");
+  w.localStorage.setItem("moss_share_lang", "en");
+  w.eval("openTaskShareSheet")({ name: "Mafakhame" }, [savedTask]);
+  await sleep(200);
+  check("v62: el mensaje en inglés usa la traducción guardada", () =>
+    assert.match(doc.getElementById("sh-text").value, /URGENT\n- Change the bathroom faucet/)
+  );
+  w.localStorage.setItem("moss_anthropic_api_key", "sk-ant-test");
   await db.captures.add({ projectId: "p-del", type: "task", text: "Pintar la cerca", priority: "green" });
   await db.captures.add({ projectId: "p-del", type: "task", text: "Pedir azulejo", priority: "yellow" });
   w.eval("openTaskListSheet('p-del')");

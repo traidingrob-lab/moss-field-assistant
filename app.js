@@ -1517,7 +1517,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "61"; // matches the sw.js cache number
+const APP_VERSION = "62"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4259,20 +4259,27 @@ function openTaskEditSheet(projectId, task) {
     recording: false,
     clarifying: false,
     beforeClarify: null,
+    // Spanish <-> English translation of the text, and the text it was made from.
+    translation: task ? String(task.translation || "") : "",
+    translationLang: task ? String(task.translationLang || "") : "",
+    translatedFrom: task ? String(task.translatedFrom != null ? task.translatedFrom : task.translation ? String(task.text || "").trim() : "") : "",
+    translating: false,
     saving: false
   };
   let closed = false;
+  let translateRun = 0; // a stale translation can't overwrite a newer one
 
   // Release the microphone however the sheet goes away.
   const cleanup = () => {
     closed = true;
+    translateRun++;
     if (state.recorder) {
       state.recorder.cancel();
       state.recorder = null;
     }
     state.recording = false;
   };
-  const busy = () => state.recording || state.clarifying || state.saving;
+  const busy = () => state.recording || state.clarifying || state.translating || state.saving;
 
   const draw = () => {
     if (closed) return;
@@ -4322,6 +4329,19 @@ function openTaskEditSheet(projectId, task) {
         <textarea id="f-note" rows="5" placeholder="Type it here, or record a voice note below">${escapeHtml(state.note)}</textarea>
       </div>
       ${clarifyControlsHtml("t", state)}
+      ${
+        state.translating
+          ? `<p class="empty" style="text-align:left;">🌐 AI is translating the task…</p>`
+          : `${translationCardHtml(state.translation, state.translationLang)}${
+              state.translation && state.translatedFrom !== state.note.trim()
+                ? `<p class="empty" style="text-align:left; margin-top:-4px;">The text changed after this translation — it will be translated again when you save.</p>`
+                : ""
+            }${
+              aiConfigured()
+                ? `<button class="btn ghost" id="t-retr" ${busy() ? "disabled" : ""} style="width:100%;">🌐 ${state.translation ? "Translate again" : "Translate"}</button>`
+                : ""
+            }${listenBarHtml(state.note, state.translatedFrom === state.note.trim() ? state.translation : "", state.translationLang, "f-note")}`
+      }
       <div class="field"><label>Voice note (optional)</label>${voiceBlock}</div>
       <div class="field"><label>Photos (optional)</label>${photoBlock}</div>
       ${
@@ -4351,7 +4371,8 @@ function openTaskEditSheet(projectId, task) {
         draw();
       })
     );
-    wireClarify("t", state, draw, draw);
+    wireClarify("t", state, draw, () => runTranslate());
+    $("t-retr")?.addEventListener("click", () => runTranslate(true));
     $("t-vlang")?.addEventListener("change", (e) => setVoiceLang(e.target.value));
     $("t-rec")?.addEventListener("click", startRecording);
     $("t-stop")?.addEventListener("click", stopRecording);
@@ -4450,6 +4471,36 @@ function openTaskEditSheet(projectId, task) {
       toast("The voice note was saved, but it couldn't be written down — type the task if you want text", 5000);
     }
     draw();
+    if (result.transcript) runTranslate();
+  };
+
+  // Translation of the text. Automatic only when the Settings switch is on;
+  // `force` = the 🌐 button (needs only the API key).
+  const runTranslate = async (force = false) => {
+    const text = state.note.trim();
+    if (!text) {
+      if (force) toast("Write the task first, then translate it");
+      draw();
+      return;
+    }
+    if (!(force ? aiConfigured() : aiTranslateEnabled())) {
+      draw();
+      return;
+    }
+    const run = ++translateRun;
+    state.translating = true;
+    draw();
+    const tr = await tryTranslate(text, force, force && state.translatedFrom === text ? state.translation : "");
+    if (closed || run !== translateRun) return;
+    state.translating = false;
+    if (tr) {
+      state.translation = tr.translation;
+      state.translationLang = tr.target;
+      state.translatedFrom = text;
+    } else if (force) {
+      toast("Couldn't translate — try again");
+    }
+    draw();
   };
 
   const save = async () => {
@@ -4461,6 +4512,17 @@ function openTaskEditSheet(projectId, task) {
     }
     state.saving = true;
     draw();
+    // The text changed since it was translated: translate it again (if the
+    // switch is on, or it had a translation before); never save a mismatch.
+    if (text && text !== state.translatedFrom && (aiTranslateEnabled() || (state.translation && aiConfigured()))) {
+      const tr = await tryTranslate(text, true);
+      if (tr) {
+        state.translation = tr.translation;
+        state.translationLang = tr.target;
+        state.translatedFrom = text;
+      }
+    }
+    const trOk = !!(text && state.translation && state.translatedFrom === text);
     const now = new Date().toISOString();
     const record = {
       ...(task || {}),
@@ -4472,6 +4534,9 @@ function openTaskEditSheet(projectId, task) {
       doneAt: state.done ? (task && task.done && task.doneAt) || now : null,
       photos: state.photos,
       voice: state.voice,
+      translation: trOk ? state.translation : "",
+      translationLang: trOk ? state.translationLang : "",
+      translatedFrom: trOk ? text : "",
       updatedAt: now
     };
     try {
@@ -4486,9 +4551,10 @@ function openTaskEditSheet(projectId, task) {
       draw();
       return;
     }
+    const stillOpen = !closed; // the sheet may have been closed while it was saving
     cleanup();
     toast(task ? "Task updated" : "Task added");
-    openTaskListSheet(projectId);
+    if (stillOpen) openTaskListSheet(projectId);
   };
 
   openSheet("", cleanup);
@@ -4522,8 +4588,13 @@ function confirmTaskDelete(projectId, task) {
 // language (its AI translation when it was written in the other one).
 async function buildTaskMessage(project, tasks, lang) {
   const es = lang === "es";
-  const textIn = async (note) => {
-    if (!note || !aiConfigured()) return note;
+  const textIn = async (note, t) => {
+    if (!note) return note;
+    // Use the translation saved with the task when it matches its text.
+    if (t.translation && t.translatedFrom === note && (t.translationLang === "en" || t.translationLang === "es")) {
+      return t.translationLang === lang ? t.translation : note;
+    }
+    if (!aiConfigured()) return note;
     let hit = listenCache.get(note);
     if (!hit) {
       const r = await tryTranslate(note, true);
@@ -4539,7 +4610,7 @@ async function buildTaskMessage(project, tasks, lang) {
     const group = sortTasks(tasks).filter((t) => taskPriority(t.priority).id === p.id);
     if (!group.length) continue;
     lines.push("", `${p.mark} ${(es ? p.es : p.label).toUpperCase()}`);
-    const texts = await Promise.all(group.map((t) => textIn(String(t.text || "").trim())));
+    const texts = await Promise.all(group.map((t) => textIn(String(t.text || "").trim(), t)));
     group.forEach((t, i) => {
       const body = texts[i] || taskHeadline(t);
       const [first, ...rest] = body.split("\n").map((l) => l.trim()).filter(Boolean);
