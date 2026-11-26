@@ -383,8 +383,18 @@ async function go(w, hash) {
   doc.querySelector('[data-capture="task"]').dispatchEvent(new w.Event("click"));
   await sleep(200);
   check("Tasks abre la lista vacía del proyecto", () => assert.match(doc.getElementById("sheet").textContent, /Tasks · Mafakhame[\s\S]*No tasks yet/));
+  check("v66: el botón ➕ dice el número de la próxima tarea", () => assert.match(doc.getElementById("tl-new").textContent, /➕ New task #1/));
   doc.getElementById("tl-new").dispatchEvent(new w.Event("click"));
   await sleep(50);
+  check("v66: la tarea nueva pide la foto primero (con opción de saltar)", () => {
+    assert.ok(doc.getElementById("tp-camera"), "falta Take photo");
+    assert.ok(doc.getElementById("tp-gallery"), "falta Gallery");
+    assert.ok(doc.getElementById("tp-skip"), "falta Skip");
+    assert.ok(!doc.getElementById("f-note"), "el texto no debe salir antes de la foto");
+    assert.match(doc.getElementById("sheet").textContent, /New task #1/);
+  });
+  doc.getElementById("tp-skip").dispatchEvent(new w.Event("click"));
+  await sleep(20);
   const fNote = doc.getElementById("f-note");
   fNote.value = "Cambiar la llave del baño";
   fNote.dispatchEvent(new w.Event("input"));
@@ -403,6 +413,7 @@ async function go(w, hash) {
     assert.ok(savedTask, "no se guardó");
     assert.strictEqual(savedTask.priority, "red");
     assert.strictEqual(savedTask.text, "Cambiar la llave del baño");
+    assert.strictEqual(savedTask.number, 1, "v66: la primera tarea es la #1");
     assert.match(doc.getElementById("sheet").textContent, /Cambiar la llave del baño[\s\S]*Urgent/);
   });
   check("v62: al guardar, la tarea se traduce y la traducción se guarda", () => {
@@ -421,7 +432,7 @@ async function go(w, hash) {
   w.eval("openTaskShareSheet")({ name: "Mafakhame" }, [savedTask]);
   await sleep(200);
   check("v62: el mensaje en inglés usa la traducción guardada", () =>
-    assert.match(doc.getElementById("sh-text").value, /URGENT\n- Change the bathroom faucet/)
+    assert.match(doc.getElementById("sh-text").value, /URGENT\n- #1 Change the bathroom faucet/)
   );
   w.localStorage.setItem("moss_anthropic_api_key", "sk-ant-test");
   await db.captures.add({ projectId: "p-del", type: "task", text: "Pintar la cerca", priority: "green" });
@@ -430,7 +441,10 @@ async function go(w, hash) {
   await sleep(200);
   check("la lista va en orden: rojo, amarillo, verde", () => {
     const titles = [...doc.querySelectorAll("[data-task-id] .title")].map((e) => e.textContent);
-    assert.deepStrictEqual(titles, ["Cambiar la llave del baño", "Pedir azulejo", "Pintar la cerca"]);
+    assert.deepStrictEqual(titles.map((x) => x.replace(/^#\d+ · /, "")), ["Cambiar la llave del baño", "Pedir azulejo", "Pintar la cerca"]);
+    assert.strictEqual(titles[0], "#1 · Cambiar la llave del baño");
+    // v66: las tareas que no tenían número reciben #2 y #3
+    assert.deepStrictEqual(titles.slice(1).map((x) => x.slice(0, 2)).sort(), ["#2", "#3"]);
   });
   doc.querySelector(`[data-task-done="${savedTask.id}"]`).dispatchEvent(new w.Event("click", { bubbles: true }));
   await sleep(300);
@@ -438,7 +452,7 @@ async function go(w, hash) {
   check("✓ marca la tarea como hecha y la pasa al final", () => {
     assert.strictEqual(savedTask.done, true);
     const titles = [...doc.querySelectorAll("[data-task-id] .title")].map((e) => e.textContent);
-    assert.strictEqual(titles[2], "Cambiar la llave del baño");
+    assert.strictEqual(titles[2], "#1 · Cambiar la llave del baño");
   });
 
   w.localStorage.removeItem("moss_anthropic_api_key"); // sin IA: el mensaje sale tal cual
@@ -447,8 +461,8 @@ async function go(w, hash) {
   check("Send the list as text arma el mensaje por colores (solo pendientes)", () => {
     const msg = doc.getElementById("sh-text").value;
     assert.match(msg, /Tasks: Mafakhame/);
-    assert.match(msg, /SOON\n- Pedir azulejo/);
-    assert.match(msg, /CAN WAIT\n- Pintar la cerca/);
+    assert.match(msg, /SOON\n- #\d Pedir azulejo/);
+    assert.match(msg, /CAN WAIT\n- #\d Pintar la cerca/);
     assert.ok(!/llave/.test(msg), "no debe incluir la tarea hecha");
   });
   w.localStorage.setItem("moss_anthropic_api_key", "sk-ant-test");
@@ -469,6 +483,8 @@ async function go(w, hash) {
     assert.strictEqual(edited.text, "Pintar la cerca de blanco");
     assert.strictEqual(edited.priority, "yellow");
   });
+  const nums = (await taskList()).map((t) => t.number).sort();
+  check("v66: las 3 tareas quedaron guardadas como #1, #2 y #3", () => assert.deepStrictEqual(nums, [1, 2, 3]));
   const countBefore = (await taskList()).length;
   check("siguen siendo 3 tareas", () => assert.strictEqual(countBefore, 3));
   await sleep(200);
@@ -481,7 +497,7 @@ async function go(w, hash) {
   check("v63: la sección Tasks del proyecto lista las pendientes", () => {
     const rows = [...doc.querySelectorAll("[data-task-row]")].map((r) => r.querySelector(".title").textContent);
     // Las dos son amarillas y se crearon en el mismo milisegundo: el orden entre ellas no importa.
-    assert.deepStrictEqual(rows.sort(), ["Pedir azulejo", "Pintar la cerca de blanco"]);
+    assert.deepStrictEqual(rows.map((x) => x.replace(/^#\d+ · /, "")).sort(), ["Pedir azulejo", "Pintar la cerca de blanco"]);
   });
   w.eval("openTaskListSheet('p-del')");
   await sleep(200);
@@ -496,6 +512,12 @@ async function go(w, hash) {
     assert.strictEqual(after.length, countBefore - 1);
     assert.ok(!after.some((t) => /Pintar/.test(t.text)));
     assert.match(toastText(), /Task deleted/);
+  });
+  w.eval("openTaskListSheet('p-del')");
+  await sleep(200);
+  check("v66: después de borrar, la próxima tarea sigue el número más alto", () => {
+    const left = after.map((t) => t.number).sort();
+    assert.match(doc.getElementById("tl-new").textContent, new RegExp("New task #" + (Math.max(...left) + 1)));
   });
 
   // ---- v64: Recent Captures — editar el texto de la foto, ✨ y traducir ----

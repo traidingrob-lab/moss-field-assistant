@@ -1084,7 +1084,7 @@ async function renderDashboard(id) {
   }
   const issues = await MossDB.issues.forProject(id);
   const captures = await MossDB.captures.forProject(id);
-  const tasks = sortTasks(captures.filter((c) => c.type === "task"));
+  const tasks = sortTasks(ensureTaskNumbers(captures.filter((c) => c.type === "task")));
   const openTasks = tasks.filter((t) => !t.done);
   // Newest first, so the compact view's single visible row is the latest one.
   const issueTime = (i) => String(i.recordedAt || i.createdAt || "");
@@ -1200,7 +1200,7 @@ async function renderDashboard(id) {
                   return `
           <div class="row" data-task-row="${escapeHtml(t.id)}" style="cursor:pointer;">
             <span class="icon" style="display:flex; align-items:center; justify-content:center;">${taskDot(p)}</span>
-            <span class="main"><span class="title">${escapeHtml(taskHeadline(t))}</span><span class="desc">${p.label}${n ? ` · 📷 ${n}` : ""}${t.voice ? " · 🎤" : ""}</span></span>
+            <span class="main"><span class="title">${escapeHtml(taskTitle(t))}</span><span class="desc">${p.label}${n ? ` · 📷 ${n}` : ""}${t.voice ? " · 🎤" : ""}</span></span>
             <span class="chev">›</span>
           </div>`;
                 })
@@ -1583,7 +1583,7 @@ async function buildAIContext() {
       }
 
       for (const t of sortTasks(captures.filter((c) => c.type === "task" && !c.done)).slice(0, 20)) {
-        lines.push(`- Task to do [${taskPriority(t.priority).label}]: ${taskHeadline(t)}`);
+        lines.push(`- Task to do [${taskPriority(t.priority).label}]: ${taskTitle(t)}`);
       }
 
       const described = captures.filter((c) => c.caption || c.transcript);
@@ -1658,7 +1658,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "65"; // matches the sw.js cache number
+const APP_VERSION = "66"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4317,6 +4317,32 @@ function taskHeadline(t) {
   return (t.photos || []).length ? "Task with photo" : t.voice ? "Voice task" : "Task";
 }
 
+// v66: every task has a number (#1, #2, …) per project, given when it is
+// added. Numbers stay the same when other tasks are done or deleted.
+const taskNumberOf = (t) => (Number.isInteger(t && t.number) && t.number > 0 ? t.number : 0);
+const taskTitle = (t) => (taskNumberOf(t) ? `#${taskNumberOf(t)} · ` : "") + taskHeadline(t);
+const maxTaskNumber = (list) => list.reduce((m, t) => Math.max(m, taskNumberOf(t)), 0);
+
+// Tasks made before v66 have no number: number them oldest first (after the
+// highest number already used) and save it. Changes the objects in place so
+// they show it right away.
+function ensureTaskNumbers(list) {
+  const missing = list
+    .filter((t) => !taskNumberOf(t))
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
+  let n = maxTaskNumber(list);
+  for (const t of missing) {
+    t.number = ++n;
+    MossDB.captures.update(t.id, { number: t.number }).catch((err) => logError("task number", err));
+  }
+  return list;
+}
+
+async function nextTaskNumber(projectId) {
+  const list = (await MossDB.captures.forProject(projectId)).filter((c) => c.type === "task");
+  return maxTaskNumber(ensureTaskNumbers(list)) + 1;
+}
+
 // Open tasks first (red, yellow, green), then finished ones; oldest first within each.
 function sortTasks(list) {
   const rank = { red: 0, yellow: 1, green: 2 };
@@ -4334,7 +4360,7 @@ function refreshAfterTaskChange() {
 }
 
 async function loadTasks(projectId) {
-  return sortTasks((await MossDB.captures.forProject(projectId)).filter((c) => c.type === "task"));
+  return sortTasks(ensureTaskNumbers((await MossDB.captures.forProject(projectId)).filter((c) => c.type === "task")));
 }
 
 async function openTaskListSheet(projectId) {
@@ -4356,7 +4382,7 @@ async function openTaskListSheet(projectId) {
       <div class="row" data-task-id="${escapeHtml(t.id)}" style="cursor:pointer; ${t.done ? "opacity:.55;" : ""}">
         <button class="btn ghost" data-task-done="${escapeHtml(t.id)}" aria-label="${t.done ? "Mark as not done" : "Mark as done"}" style="flex:none; width:34px; height:34px; padding:0; border-radius:8px; font-size:17px; line-height:1;">${t.done ? "✓" : ""}</button>
         <span style="flex:none; display:flex; align-items:center;">${taskDot(p)}</span>
-        <span class="main"><span class="title" style="${t.done ? "text-decoration:line-through;" : ""}">${escapeHtml(taskHeadline(t))}</span><span class="desc">${t.done ? "Done" : p.label}${n ? ` · 📷 ${n}` : ""}${t.voice ? " · 🎤" : ""}</span></span>
+        <span class="main"><span class="title" style="${t.done ? "text-decoration:line-through;" : ""}">${escapeHtml(taskTitle(t))}</span><span class="desc">${t.done ? "Done" : p.label}${n ? ` · 📷 ${n}` : ""}${t.voice ? " · 🎤" : ""}</span></span>
         <span class="chev">›</span>
       </div>`;
     })
@@ -4364,7 +4390,7 @@ async function openTaskListSheet(projectId) {
   openSheet(`
     <h2>✅ Tasks${project ? " · " + escapeHtml(project.name) : ""}</h2>
     <span class="desc">${open.length} to do${urgent ? ` · ${urgent} urgent` : ""}${tasks.length > open.length ? ` · ${tasks.length - open.length} done` : ""}</span>
-    <button class="btn primary" id="tl-new" style="width:100%;">+ New task</button>
+    <button class="btn primary" id="tl-new" style="width:100%; font-size:17px;">➕ New task #${maxTaskNumber(tasks) + 1}</button>
     <div class="card card-list">${rows || `<div class="row"><span class="empty">No tasks yet — add the first one.</span></div>`}</div>
     ${open.length ? `<button class="btn ghost" id="tl-share" style="width:100%;">💬 Send the list as text</button>` : ""}
     ${closeButton()}
@@ -4406,6 +4432,9 @@ function openTaskEditSheet(projectId, task) {
     recording: false,
     clarifying: false,
     beforeClarify: null,
+    // v66: a new task asks for a photo first (it can be skipped).
+    step: task ? "edit" : "photo",
+    number: task ? taskNumberOf(task) : 0, // a new task's number is looked up below
     // Spanish <-> English translation of the text, and the text it was made from.
     translation: task ? String(task.translation || "") : "",
     translationLang: task ? String(task.translationLang || "") : "",
@@ -4430,6 +4459,20 @@ function openTaskEditSheet(projectId, task) {
 
   const draw = () => {
     if (closed) return;
+    const heading = `${task ? "Edit task" : "New task"}${state.number ? ` #${state.number}` : ""}`;
+    if (state.step === "photo") {
+      $sheet.innerHTML = `
+        <h2>✅ ${heading}</h2>
+        <p style="margin:0;">📸 First, take a photo of what needs to be done.</p>
+        <button class="btn primary" id="tp-camera" style="width:100%; font-size:17px;">📸 Take photo</button>
+        <button class="btn ghost" id="tp-gallery" style="width:100%;">🖼 Choose from gallery</button>
+        <button class="btn ghost" id="tp-skip" style="width:100%;">Skip — no photo ›</button>
+        <div class="sheet-actions">
+          <button class="btn ghost" id="t-cancel">Cancel</button>
+        </div>`;
+      wire();
+      return;
+    }
     const prio = TASK_PRIORITIES.map((p) => {
       const on = state.priority === p.id;
       return `<button class="btn ${on ? "primary" : "ghost"}" data-prio="${p.id}" ${state.saving ? "disabled" : ""} style="flex:1; padding:10px 4px; font-size:13px; display:flex; align-items:center; justify-content:center; gap:6px; ${on ? `background:${p.color}; border-color:${p.color}; color:#fff;` : ""}">${taskDot(p, 12)}${p.label}</button>`;
@@ -4470,7 +4513,7 @@ function openTaskEditSheet(projectId, task) {
       <span class="desc">${state.photos.length}/${MAX_TASK_PHOTOS} photos</span>`;
 
     $sheet.innerHTML = `
-      <h2>${task ? "Edit task" : "New task"}</h2>
+      <h2>${heading}</h2>
       <div class="field"><label>How urgent?</label><div style="display:flex; gap:6px;">${prio}</div></div>
       <div class="field"><label>What needs to be done</label>
         <textarea id="f-note" rows="5" placeholder="Type it here, or record a voice note below">${escapeHtml(state.note)}</textarea>
@@ -4510,6 +4553,12 @@ function openTaskEditSheet(projectId, task) {
     $("t-cancel")?.addEventListener("click", () => {
       cleanup();
       openTaskListSheet(projectId);
+    });
+    $("tp-camera")?.addEventListener("click", () => addPhotos(false));
+    $("tp-gallery")?.addEventListener("click", () => addPhotos(true));
+    $("tp-skip")?.addEventListener("click", () => {
+      state.step = "edit";
+      draw();
     });
     $("f-note")?.addEventListener("input", (e) => {
       state.note = e.target.value;
@@ -4579,6 +4628,7 @@ function openTaskEditSheet(projectId, task) {
           toast(`Couldn't read the photo: ${errorText(err)}`, 6000);
         }
       }
+      if (state.photos.length) state.step = "edit"; // photo taken: go on to the rest
       draw();
     });
     openFilePicker(input);
@@ -4681,10 +4731,21 @@ function openTaskEditSheet(projectId, task) {
     }
     const trOk = !!(text && state.translation && state.translatedFrom === text);
     const now = new Date().toISOString();
+    // A new task gets the next free number, read again now in case another
+    // task was added meanwhile.
+    let number = state.number;
+    if (!task || !number) {
+      try {
+        number = await nextTaskNumber(projectId);
+      } catch (err) {
+        logError("task number", err);
+      }
+    }
     const record = {
       ...(task || {}),
       projectId,
       type: "task",
+      ...(number ? { number } : {}),
       text,
       priority: state.priority,
       done: state.done,
@@ -4710,19 +4771,30 @@ function openTaskEditSheet(projectId, task) {
     }
     const stillOpen = !closed; // the sheet may have been closed while it was saving
     cleanup();
-    toast(task ? "Task updated" : "Task added");
+    toast(task ? "Task updated" : `Task${number ? ` #${number}` : ""} added`);
     refreshAfterTaskChange();
     if (stillOpen) openTaskListSheet(projectId);
   };
 
   openSheet("", cleanup);
   draw();
+  if (!task) {
+    nextTaskNumber(projectId)
+      .then((n) => {
+        if (closed || state.number) return;
+        state.number = n;
+        // Only the heading changes: don't redraw over a half-typed note.
+        const h = $sheet.querySelector("h2");
+        if (h) h.textContent = `${state.step === "photo" ? "✅ " : ""}New task #${n}`;
+      })
+      .catch((err) => logError("task number", err));
+  }
 }
 
 function confirmTaskDelete(projectId, task) {
   openSheet(`
     <h2>Delete this task?</h2>
-    <p style="margin:0;">"${escapeHtml(taskHeadline(task))}"${(task.photos || []).length || task.voice ? " — with its photos and voice note" : ""}. This can't be undone.</p>
+    <p style="margin:0;">"${escapeHtml(taskTitle(task))}"${(task.photos || []).length || task.voice ? " — with its photos and voice note" : ""}. This can't be undone.</p>
     <div class="sheet-actions">
       <button class="btn ghost" id="td-cancel">Cancel</button>
       <button class="btn primary" id="td-confirm" style="background:var(--red, #DC2626); border-color:var(--red, #DC2626);">🗑 Delete</button>
@@ -4773,7 +4845,7 @@ async function buildTaskMessage(project, tasks, lang) {
     group.forEach((t, i) => {
       const body = texts[i] || taskHeadline(t);
       const [first, ...rest] = body.split("\n").map((l) => l.trim()).filter(Boolean);
-      lines.push(`- ${(first || "").replace(/^[-•*]\s*/, "")}${t.done ? (es ? " (hecha)" : " (done)") : ""}`);
+      lines.push(`- ${taskNumberOf(t) ? `#${taskNumberOf(t)} ` : ""}${(first || "").replace(/^[-•*]\s*/, "")}${t.done ? (es ? " (hecha)" : " (done)") : ""}`);
       for (const l of rest) lines.push(`   ${l}`);
     });
   }
@@ -4791,7 +4863,7 @@ function openTaskShareSheet(project, tasks) {
   }
   return openShareSheet({
     build: (lang) => buildTaskMessage(project, tasks, lang),
-    fallback: `✅ Tasks\n` + tasks.map((t) => `- ${taskHeadline(t)}`).join("\n"),
+    fallback: `✅ Tasks\n` + tasks.map((t) => `- ${taskTitle(t)}`).join("\n"),
     files,
     noun: "photo"
   });
