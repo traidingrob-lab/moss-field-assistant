@@ -162,6 +162,23 @@ test("traducción de nota de voz usa Haiku y se interpreta bien", async () => {
   assert.strictEqual(calls[0].body.max_tokens, 1000 + 2000);
 });
 
+test("v65: Spanglish (\"instalar garage baseboard\") siempre se traduce al inglés", async () => {
+  // La IA a veces dice que el original es inglés: igual debe quedar como traducción al inglés.
+  const { ai, calls } = loadAi({ responses: [ok('{"language":"en","translation":"Install the garage baseboard"}')] });
+  const r = await ai.translateVoiceNote("installar garage baseboard");
+  assert.strictEqual(r.target, "en");
+  assert.strictEqual(r.lang, "es");
+  assert.strictEqual(r.translation, "Install the garage baseboard");
+  assert.match(calls[0].body.messages[0].content, /Never translate it to Spanish/);
+});
+
+test("v65: una nota toda en inglés se sigue traduciendo al español", async () => {
+  const { ai, calls } = loadAi({ responses: [ok('{"language":"en","translation":"Instalar el zócalo del garaje"}')] });
+  const r = await ai.translateVoiceNote("Install the garage baseboard tomorrow");
+  assert.strictEqual(r.target, "es");
+  assert.doesNotMatch(calls[0].body.messages[0].content, /Never translate it to Spanish/);
+});
+
 test("título de issue usa Haiku", async () => {
   const { ai, calls } = loadAi({ responses: [ok("Fuga en tubería")] });
   assert.strictEqual(await ai.translateIssueTitle("Pipe leak", "es"), "Fuga en tubería");

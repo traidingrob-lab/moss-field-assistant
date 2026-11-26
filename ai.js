@@ -653,14 +653,25 @@ async function identifyMaterial(dataUrl, transcript = "") {
 // { lang, target, translation } where `target` is the language of the
 // translation ("en" or "es"), or null if there is nothing to translate
 // (empty text, or the model returned the same text). Throws on API failure.
+// v65: a note with ANY Spanish in it ("instalar garage baseboard") is
+// Spanish/Spanglish written by the boss and must come out in English — before,
+// the AI could call it English (most words were) and translate it to Spanish.
+const SPANISH_MARKERS = /[áéíóúñ¿¡]|\b(?:el|la|los|las|del|de|para|por|con|que|y|un|una|unos|unas|es|está|están|muy|pero|porque|también|falta|faltan|poner|instalar|installar|cambiar|arreglar|pintar|limpiar|quitar|revisar|comprar|pedir|terminar|necesita|necesitamos|tiene|hacer|mañana|hoy|aquí|allí|baño|cocina|cuarto|piso|techo|puerta|ventana)\b/i;
+function hasSpanish(text) {
+  return SPANISH_MARKERS.test(String(text || ""));
+}
+
 async function translateVoiceNote(text, previous = "") {
   const t = String(text || "").trim();
   if (!t) return null;
+  const toEnglish = hasSpanish(t);
   const prompt =
     "Translate this construction job-site voice note between Spanish and English.\n" +
-    "If it is in Spanish, translate it to English. If it is in English, translate it to Spanish. " +
-    "If it mixes both, translate everything into the language that is NOT the main one. " +
-    "If it is in some other language, translate it to English.\n" +
+    (toEnglish
+      ? "This note is written in Spanish or in a mix of Spanish and English (Spanglish). Translate ALL of it into natural ENGLISH — " +
+        'for example "instalar garage baseboard" becomes "Install the garage baseboard". Never translate it to Spanish.\n'
+      : "If it is in Spanish, or mixes Spanish and English (Spanglish), translate it to English. Only if it is entirely in English, translate it to Spanish. " +
+        "If it is in some other language, translate it to English.\n") +
     "Keep it natural and faithful: use correct construction/trade terms, keep numbers, measurements, names and brands exactly, " +
     "and do not add, remove or explain anything.\n" +
     (previous
@@ -668,7 +679,7 @@ async function translateVoiceNote(text, previous = "") {
         "Fix any mistakes, unnatural wording or wrong trade terms; do not just repeat it unless it is already perfect.\n"
       : "") +
     `Voice note:\n"""${t}"""\n` +
-    'Reply with ONLY a JSON object: {"language": "es" or "en" or "other" (the language of the original), "translation": "<the translation>"}';
+    'Reply with ONLY a JSON object: {"language": "es" or "en" or "other" (the language of the original; use "es" for Spanglish), "translation": "<the translation>"}';
   // Long notes (an inspection can run for minutes) need a bigger answer budget.
   const reply = await callClaude(prompt, Math.min(8000, Math.max(1000, Math.ceil(t.length / 2) + 500)), {
     tier: "fast",
@@ -677,7 +688,8 @@ async function translateVoiceNote(text, previous = "") {
   const parsed = parseJsonReply(reply);
   if (!parsed || typeof parsed.translation !== "string") throw new Error("AI reply wasn't readable.");
   const translation = parsed.translation.trim();
-  const lang = String(parsed.language || "").toLowerCase().slice(0, 2);
+  let lang = String(parsed.language || "").toLowerCase().slice(0, 2);
+  if (toEnglish) lang = "es"; // we asked for English: label it that way whatever the AI called the original
   const target = lang === "en" ? "es" : "en";
   if (!translation || translation.toLowerCase() === t.toLowerCase()) return null;
   return { lang: lang === "es" || lang === "en" ? lang : "other", target, translation };

@@ -1658,7 +1658,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "64"; // matches the sw.js cache number
+const APP_VERSION = "65"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4479,9 +4479,9 @@ function openTaskEditSheet(projectId, task) {
       ${
         state.translating
           ? `<p class="empty" style="text-align:left;">🌐 AI is translating the task…</p>`
-          : `${translationCardHtml(state.translation, state.translationLang)}${
-              state.translation && state.translatedFrom !== state.note.trim()
-                ? `<p class="empty" style="text-align:left; margin-top:-4px;">The text changed after this translation — it will be translated again when you save.</p>`
+          : `<div id="t-trcard" style="${state.translation && state.translatedFrom !== state.note.trim() ? "opacity:.35;" : ""}">${translationCardHtml(state.translation, state.translationLang)}</div>${
+              state.translation
+                ? `<p class="empty" id="t-trstale" style="text-align:left; margin-top:-4px; ${state.translatedFrom !== state.note.trim() ? "" : "display:none;"}">⚠️ This translation is of the old text — tap 🌐 Translate again (it is also redone when you save).</p>`
                 : ""
             }${
               aiConfigured()
@@ -4511,7 +4511,17 @@ function openTaskEditSheet(projectId, task) {
       cleanup();
       openTaskListSheet(projectId);
     });
-    $("f-note")?.addEventListener("input", (e) => { state.note = e.target.value; });
+    $("f-note")?.addEventListener("input", (e) => {
+      state.note = e.target.value;
+      // v65: typing doesn't redraw the sheet, so mark the shown translation
+      // as old right away (before, it kept looking like the translation of
+      // the new text).
+      const stale = !!state.translation && state.translatedFrom !== state.note.trim();
+      const card = $("t-trcard");
+      if (card) card.style.opacity = stale ? ".35" : "";
+      const msg = $("t-trstale");
+      if (msg) msg.style.display = stale ? "" : "none";
+    });
     $sheet.querySelectorAll("[data-prio]").forEach((b) =>
       b.addEventListener("click", () => {
         state.priority = b.dataset.prio;
