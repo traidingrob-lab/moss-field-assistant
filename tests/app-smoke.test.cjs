@@ -545,12 +545,14 @@ async function go(w, hash) {
     assert.match(txt, /Change the bathroom faucet/);
   });
   const repPh = w.eval("taskPdfReport")({ name: "X" }, [{ id: "ph1", text: "Con fotos", priority: "red", photos: ["data:image/jpeg;base64,AAAA"] }]);
-  check("v68: las fotos van 2 por fila (6 por página) con marco del color de la urgencia", () => {
-    const b = repPh.blocks.find((x) => x.type === "photos");
-    assert.ok(b, "faltan las fotos");
-    assert.strictEqual(b.cols, 2);
+  check("v69: la tarea con foto va como tarjeta (foto + texto al lado) con marco del color de la urgencia", () => {
+    const b = repPh.blocks.find((x) => x.type === "taskcard");
+    assert.ok(b, "falta la tarjeta");
+    assert.strictEqual(b.photos.length, 1);
     assert.strictEqual(JSON.stringify(b.borderRgb), "[220,38,38]");
-    assert.match(JSON.stringify(repPh.blocks), /URGENT \(Urgente\)[\s\S]*Do it right away/);
+    assert.match(b.heading, /URGENT \(Urgente\)/);
+    assert.match(b.desc, /Do it right away/);
+    assert.strictEqual(b.text, "Con fotos");
   });
   let phPdfOk = false;
   try {

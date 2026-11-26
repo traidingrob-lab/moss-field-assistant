@@ -1658,7 +1658,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "68"; // matches the sw.js cache number
+const APP_VERSION = "69"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4905,19 +4905,40 @@ function taskPdfReport(project, tasks, generatedAt = new Date()) {
 }
 
 // Each task: number + urgency, a short line saying what that urgency means,
-// the text, its translation and its photos. v68: the photos go 2 across x 3
-// down (6 per page), each in a thick frame of the task's urgency colour.
+// the text and its translation. v69: a task with photos is a "card" — 2 per
+// page in zigzag (1st photo top-left with the text on its right, 2nd photo
+// bottom-right with the text on its left), the photo framed in the urgency
+// colour (grey when done); extra photos go small under the text.
 function taskPdfBlocks(t, blocks) {
   const p = taskPriority(t.priority);
   const text = String(t.text || "").trim();
   const trOk = !!(text && t.translation && t.translatedFrom === text && (t.translationLang === "en" || t.translationLang === "es"));
   const num = taskNumberOf(t) ? `#${taskNumberOf(t)}  -  ` : "";
-  blocks.push({ type: "label", text: t.done ? `${num}DONE (Hecha)` : `${num}${p.label.toUpperCase()} (${p.es})` });
-  blocks.push({ type: "note", text: t.done ? "This task is finished / Esta tarea ya está hecha" : `${p.desc} / ${p.esDesc}` });
-  if (text) blocks.push({ type: "text", text, lang: trOk ? (t.translationLang === "en" ? "es" : "en") : "" });
+  const heading = t.done ? `${num}DONE (Hecha)` : `${num}${p.label.toUpperCase()} (${p.es})`;
+  const desc = t.done ? "This task is finished / Esta tarea ya está hecha" : `${p.desc} / ${p.esDesc}`;
+  const rgb = t.done ? [156, 163, 175] : p.rgb;
+  const lang = trOk ? (t.translationLang === "en" ? "es" : "en") : "";
+  if ((t.photos || []).length) {
+    blocks.push({
+      type: "taskcard",
+      heading,
+      headingRgb: rgb,
+      desc,
+      text,
+      lang,
+      translation: trOk ? t.translation : "",
+      translationLabel: trOk ? translationLabel(t.translationLang) : "",
+      translationLang: trOk ? t.translationLang : "",
+      photos: t.photos,
+      borderRgb: rgb
+    });
+    return;
+  }
+  blocks.push({ type: "label", text: heading });
+  blocks.push({ type: "note", text: desc });
+  if (text) blocks.push({ type: "text", text, lang });
   else blocks.push({ type: "note", text: "(No written note)" });
   if (trOk) blocks.push({ type: "translation", label: translationLabel(t.translationLang), text: t.translation, lang: t.translationLang });
-  if ((t.photos || []).length) blocks.push({ type: "photos", photos: t.photos, cols: 2, cellH: 200, borderRgb: t.done ? [156, 163, 175] : p.rgb });
 }
 
 async function openTaskPdfSheet(projectId) {

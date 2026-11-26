@@ -793,6 +793,11 @@ async function buildInspectionsPdf(sections, opts = {}) {
 //                                                   cols 2 + cellH 205 = 6 photos per page;
 //                                                   borderRgb = thick coloured frame on each photo)
 //   { type: "note",    text }                       small grey italic line
+//   { type: "taskcard", heading, headingRgb, desc, text, lang, translation,
+//                      translationLabel, translationLang, photos, borderRgb }
+//                                                   v69: one task with photo, 2 per page in
+//                                                   zigzag: 1st photo top-left + text right,
+//                                                   2nd photo bottom-right + text left
 async function buildTextReportPdf(report, opts = {}) {
   if (!window.jspdf || !window.jspdf.jsPDF) throw new Error("PDF library (jspdf.umd.min.js) isn't loaded.");
   const { jsPDF } = window.jspdf;
@@ -862,6 +867,11 @@ async function buildTextReportPdf(report, opts = {}) {
   y += 18;
   rule([200, 205, 212], 0.8);
   y += 14;
+
+  // Task cards: which page the last one went on and how many are on it, so
+  // the first card of a page has its photo on the left, the second on the right.
+  let cardPage = 0;
+  let cardsOnPage = 0;
 
   for (const block of report.blocks || []) {
     if (block.type === "project") {
@@ -993,6 +1003,113 @@ async function buildTextReportPdf(report, opts = {}) {
         paragraph("(This photo couldn't be included in the PDF)", M, contentW, 9, "italic", SOFT, 13);
       }
       if (block.caption) paragraph(pdfSafe(block.caption), M, contentW, 10, "normal", INK, 13.5);
+      y += 8;
+    } else if (block.type === "taskcard") {
+      const CARD_H = 280;
+      const bw = 4; // photo frame thickness
+      const photoW = 250;
+      const gap = 16;
+      ensure(CARD_H + 4);
+      const page = doc.getNumberOfPages();
+      if (page !== cardPage) {
+        cardPage = page;
+        cardsOnPage = 0;
+      }
+      const left = cardsOnPage % 2 === 0;
+      cardsOnPage++;
+      const top = y;
+      const border = Array.isArray(block.borderRgb) ? block.borderRgb : SOFT;
+      const textW = contentW - photoW - bw * 2 - gap;
+      const textX = left ? M + photoW + bw * 2 + gap : M;
+
+      // Main photo: top-left, or bottom-right on the second card.
+      const pr = block.photos && block.photos[0] ? await prepareImage(block.photos[0]) : null;
+      const boxW = photoW;
+      const boxH = CARD_H - bw * 2;
+      let pw = boxW;
+      let ph = Math.min(boxH, 180);
+      if (pr) {
+        const sc = Math.min(boxW / pr.width, boxH / pr.height);
+        pw = pr.width * sc;
+        ph = pr.height * sc;
+      }
+      const px = left ? M + bw : M + contentW - bw - pw;
+      const py = left ? top + bw : top + CARD_H - bw - ph;
+      if (pr) {
+        doc.addImage(pr.dataUrl, "JPEG", px, py, pw, ph);
+      } else {
+        font("italic", 9);
+        color(SOFT);
+        doc.text("(Photo couldn't be included)", px + 10, py + 20);
+      }
+      doc.setDrawColor(border[0], border[1], border[2]);
+      doc.setLineWidth(bw);
+      doc.rect(px - bw / 2, py - bw / 2, pw + bw, ph + bw);
+
+      // Extra photos: small, under the text.
+      const extras = [];
+      for (const d of (block.photos || []).slice(1, 5)) {
+        const ex = await prepareImage(d);
+        if (ex) extras.push(ex);
+      }
+      const thumbGap = 8;
+      const thumbW = (textW - thumbGap * 2) / 3;
+      const thumbH = 62;
+      const thumbRows = Math.ceil(extras.length / 3);
+      const thumbsH = thumbRows ? thumbRows * (thumbH + thumbGap) : 0;
+
+      // The text column, cut short if it would not fit in the card.
+      const lines = [];
+      const add = (text, style, size, rgb, lead) => {
+        font(style, size);
+        for (const raw of String(text).split("\n")) {
+          for (const l of raw.trim() ? doc.splitTextToSize(raw, textW) : [""]) lines.push({ l, style, size, rgb, lead });
+        }
+      };
+      add(pdfSafe(block.heading), "bold", 13, block.headingRgb || INK, 17);
+      if (block.desc) add(pdfSafe(block.desc), "italic", 9.5, SOFT, 13);
+      lines.push({ l: "", style: "normal", size: 6, rgb: INK, lead: 6 });
+      const text = pdfSafe(block.text).trim();
+      if (text) add(text, "normal", NOTE_PT, noteRgb(block.lang), NOTE_LEAD);
+      else add("(No written note)", "italic", 10, SOFT, 14);
+      const tr = pdfSafe(block.translation).trim();
+      if (tr) {
+        lines.push({ l: "", style: "normal", size: 6, rgb: INK, lead: 6 });
+        add(pdfSafe(block.translationLabel || "Translation"), "bold", 9, SOFT, 13);
+        add(tr, "normal", NOTE_PT, noteRgb(block.translationLang), NOTE_LEAD);
+      }
+      const room = CARD_H - thumbsH - 4;
+      let ty = top;
+      for (let k = 0; k < lines.length; k++) {
+        const ln = lines[k];
+        const last = ty + ln.lead + (lines[k + 1] ? lines[k + 1].lead : 0) > top + room;
+        if (ty + ln.lead > top + room) break;
+        font(ln.style, ln.size);
+        color(ln.rgb);
+        let out = ln.l;
+        if (last && k < lines.length - 1) out = out.replace(/\s*\S*$/, "") + "...";
+        if (out) doc.text(out, textX, ty + ln.size);
+        ty += ln.lead;
+        if (last) break;
+      }
+
+      extras.forEach((ex, k) => {
+        const sc = Math.min(thumbW / ex.width, thumbH / ex.height);
+        const w = ex.width * sc;
+        const h = ex.height * sc;
+        const x = textX + (k % 3) * (thumbW + thumbGap);
+        const yy = top + CARD_H - thumbsH + Math.floor(k / 3) * (thumbH + thumbGap);
+        doc.addImage(ex.dataUrl, "JPEG", x, yy, w, h);
+        doc.setDrawColor(border[0], border[1], border[2]);
+        doc.setLineWidth(2);
+        doc.rect(x - 1, yy - 1, w + 2, h + 2);
+      });
+
+      y = top + CARD_H + 6;
+      // Thin line between the two cards of a page.
+      if (y + 8 + CARD_H <= bottom) {
+        rule([229, 231, 235], 0.5);
+      }
       y += 8;
     } else if (block.type === "photos") {
       const prepared = [];
