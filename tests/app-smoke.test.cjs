@@ -520,6 +520,33 @@ async function go(w, hash) {
     assert.match(doc.getElementById("tl-new").textContent, new RegExp("New task #" + (Math.max(...left) + 1)));
   });
 
+  // ---- v67: PDF de la lista de tareas ----
+  w.eval("openTaskListSheet('p-del')");
+  await sleep(200);
+  check("v67: la lista tiene el botón 📄 Create PDF", () => assert.ok(doc.getElementById("tl-pdf"), "falta el botón PDF"));
+  doc.getElementById("tl-pdf").dispatchEvent(new w.Event("click"));
+  await sleep(200);
+  check("v67: el PDF deja escoger las tareas (las hechas sin marcar)", () => {
+    const boxes = [...doc.querySelectorAll("[data-tpid]")];
+    assert.strictEqual(boxes.length, 2);
+    assert.strictEqual(boxes.filter((b) => b.checked).length, 1, "solo la pendiente va marcada");
+  });
+  const rep = w.eval("taskPdfReport")({ name: "Mafakhame" }, await taskList());
+  check("v67: el PDF lleva número, color, texto y traducción", () => {
+    assert.strictEqual(rep.title, "Task List");
+    const txt = JSON.stringify(rep.blocks);
+    assert.match(txt, /SOON \(Pronto\)/);
+    assert.match(txt, /#\d  -  Soon/);
+    assert.match(txt, /Pedir azulejo/);
+    assert.match(txt, /DONE \(Hechas\)/);
+    assert.match(txt, /#1  -  Done/);
+    assert.match(txt, /Change the bathroom faucet/);
+  });
+  if (!w.URL.createObjectURL) { w.URL.createObjectURL = () => "blob:test"; w.URL.revokeObjectURL = () => {}; } // jsdom no los tiene (el teléfono sí)
+  doc.getElementById("tp-pdf-create").dispatchEvent(new w.Event("click"));
+  await sleep(1500);
+  check("v67: Create PDF arma el PDF y ofrece mandarlo", () => assert.match(doc.getElementById("sheet").textContent, /PDF ready[\s\S]*Tasks - Mafakhame[\s\S]*1 task\b/));
+
   // ---- v64: Recent Captures — editar el texto de la foto, ✨ y traducir ----
   doc.getElementById("sheet-close")?.dispatchEvent(new w.Event("click"));
   await db.captures.add({ id: "zz-cap", projectId: "p-del", type: "photo", dataUrl: "data:image/jpeg;base64,AAAA", caption: "Water damage on ceiling" });

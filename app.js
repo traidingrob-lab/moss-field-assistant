@@ -1658,7 +1658,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "66"; // matches the sw.js cache number
+const APP_VERSION = "67"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4393,9 +4393,11 @@ async function openTaskListSheet(projectId) {
     <button class="btn primary" id="tl-new" style="width:100%; font-size:17px;">➕ New task #${maxTaskNumber(tasks) + 1}</button>
     <div class="card card-list">${rows || `<div class="row"><span class="empty">No tasks yet — add the first one.</span></div>`}</div>
     ${open.length ? `<button class="btn ghost" id="tl-share" style="width:100%;">💬 Send the list as text</button>` : ""}
+    ${tasks.length ? `<button class="btn ghost" id="tl-pdf" style="width:100%;">📄 Create PDF (email / text)</button>` : ""}
     ${closeButton()}
   `);
   wireCloseButton();
+  document.getElementById("tl-pdf")?.addEventListener("click", () => openTaskPdfSheet(projectId));
   document.getElementById("tl-new").addEventListener("click", () => openTaskEditSheet(projectId, null));
   document.getElementById("tl-share")?.addEventListener("click", () => openTaskShareSheet(project, open));
   $sheet.querySelectorAll("[data-task-id]").forEach((row) =>
@@ -4866,6 +4868,111 @@ function openTaskShareSheet(project, tasks) {
     fallback: `✅ Tasks\n` + tasks.map((t) => `- ${taskTitle(t)}`).join("\n"),
     files,
     noun: "photo"
+  });
+}
+
+// v67: the task list as a PDF (to send by email or text). Each task: its
+// number and colour, the text, its translation and its photos.
+function taskPdfReport(project, tasks, generatedAt = new Date()) {
+  let day;
+  try {
+    day = generatedAt.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  } catch {
+    day = generatedAt.toDateString();
+  }
+  const blocks = [];
+  const sorted = sortTasks(tasks);
+  for (const p of TASK_PRIORITIES) {
+    const group = sorted.filter((t) => !t.done && taskPriority(t.priority).id === p.id);
+    if (!group.length) continue;
+    blocks.push({ type: "section", text: `${p.label.toUpperCase()} (${p.es})  -  ${group.length}` });
+    for (const t of group) taskPdfBlocks(t, blocks);
+  }
+  const done = sorted.filter((t) => t.done);
+  if (done.length) {
+    blocks.push({ type: "section", text: `DONE (Hechas)  -  ${done.length}` });
+    for (const t of done) taskPdfBlocks(t, blocks);
+  }
+  const open = tasks.filter((t) => !t.done).length;
+  return {
+    title: "Task List",
+    subtitle: `${project ? project.name + (project.address ? "  -  " + project.address : "") + "  -  " : ""}${day}  -  ${open} to do`,
+    blocks
+  };
+}
+
+function taskPdfBlocks(t, blocks) {
+  const p = taskPriority(t.priority);
+  const text = String(t.text || "").trim();
+  const trOk = !!(text && t.translation && t.translatedFrom === text && (t.translationLang === "en" || t.translationLang === "es"));
+  blocks.push({ type: "label", text: `${taskNumberOf(t) ? `#${taskNumberOf(t)}  -  ` : ""}${t.done ? "Done" : p.label}` });
+  if (text) blocks.push({ type: "text", text, lang: trOk ? (t.translationLang === "en" ? "es" : "en") : "" });
+  else blocks.push({ type: "note", text: "(No written note)" });
+  if (trOk) blocks.push({ type: "translation", label: translationLabel(t.translationLang), text: t.translation, lang: t.translationLang });
+  if ((t.photos || []).length) blocks.push({ type: "photos", photos: t.photos });
+}
+
+async function openTaskPdfSheet(projectId) {
+  if (!window.jspdf) {
+    toast("PDF library missing — upload jspdf.umd.min.js to GitHub");
+    return;
+  }
+  let tasks, project;
+  try {
+    [tasks, project] = await Promise.all([loadTasks(projectId), MossDB.projects.get(projectId)]);
+  } catch (err) {
+    logError("task pdf", err);
+    toast(`Couldn't open the tasks: ${errorText(err)}`, 6000);
+    return;
+  }
+  if (!tasks.length) {
+    toast("No tasks to put in a PDF");
+    return;
+  }
+  openSheet(`
+    <h2>📄 Task list PDF</h2>
+    <p class="empty" style="text-align:left; margin-top:-4px;">Choose what goes in the PDF. Each task includes its text, translation and photos.</p>
+    <div class="card card-list">
+      ${tasks
+        .map((t) => {
+          const p = taskPriority(t.priority);
+          const n = (t.photos || []).length;
+          return `
+        <label class="row" style="cursor:pointer; gap:12px;">
+          <input type="checkbox" data-tpid="${escapeHtml(t.id)}" ${t.done ? "" : "checked"} style="width:20px; height:20px; flex:none;">
+          <span style="flex:none; display:flex; align-items:center;">${taskDot(p)}</span>
+          <span class="main"><span class="title">${escapeHtml(taskTitle(t))}</span><span class="desc">${t.done ? "Done" : p.label}${n ? ` · 📷 ${n}` : ""}</span></span>
+        </label>`;
+        })
+        .join("")}
+    </div>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="tp-pdf-cancel">Back</button>
+      <button class="btn primary" id="tp-pdf-create">Create PDF</button>
+    </div>
+  `);
+  document.getElementById("tp-pdf-cancel").addEventListener("click", () => openTaskListSheet(projectId));
+  document.getElementById("tp-pdf-create").addEventListener("click", async () => {
+    const chosen = new Set([...$sheet.querySelectorAll("[data-tpid]")].filter((el) => el.checked).map((el) => el.dataset.tpid));
+    const picked = tasks.filter((t) => chosen.has(t.id));
+    if (!picked.length) {
+      toast("Select at least one task");
+      return;
+    }
+    const btn = document.getElementById("tp-pdf-create");
+    btn.disabled = true;
+    btn.textContent = "Building PDF…";
+    try {
+      const blob = await buildTextReportPdf(taskPdfReport(project, picked));
+      const day = new Date().toISOString().slice(0, 10);
+      const fileName = `Tasks - ${project ? project.name : "Project"} - ${day}.pdf`.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, " ");
+      showPdfReady(blob, fileName, picked.length, "task");
+    } catch (err) {
+      logError("task pdf build", err);
+      toast("Couldn't build the PDF — try again");
+      btn.disabled = false;
+      btn.textContent = "Create PDF";
+    }
   });
 }
 
