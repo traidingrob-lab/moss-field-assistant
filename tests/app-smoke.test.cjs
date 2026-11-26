@@ -498,6 +498,44 @@ async function go(w, hash) {
     assert.match(toastText(), /Task deleted/);
   });
 
+  // ---- v64: Recent Captures — editar el texto de la foto, ✨ y traducir ----
+  doc.getElementById("sheet-close")?.dispatchEvent(new w.Event("click"));
+  await db.captures.add({ id: "zz-cap", projectId: "p-del", type: "photo", dataUrl: "data:image/jpeg;base64,AAAA", caption: "Water damage on ceiling" });
+  w.eval("render()"); // ya estamos en #/project/p-del: volver a dibujar
+  await sleep(250);
+  doc.querySelector('[data-photo-id="zz-cap"]').dispatchEvent(new w.Event("click"));
+  await sleep(50);
+  check("v64: la foto tiene Edit text, ✨ y 🌐 Translate", () => {
+    assert.ok(doc.getElementById("pv-edit"));
+    assert.ok(doc.getElementById("pv-clarify"));
+    assert.ok(doc.getElementById("pv-retr"));
+    assert.match(doc.getElementById("sheet").textContent, /Water damage on ceiling/);
+  });
+  doc.getElementById("pv-edit").dispatchEvent(new w.Event("click"));
+  await sleep(20);
+  doc.getElementById("pe-clarify").dispatchEvent(new w.Event("click"));
+  await sleep(200);
+  check("v64: ✨ reescribe el texto de la foto y Undo lo regresa", () => {
+    assert.strictEqual(doc.getElementById("pe-text").value, "ok");
+    doc.getElementById("pe-undo").dispatchEvent(new w.Event("click"));
+    assert.strictEqual(doc.getElementById("pe-text").value, "Water damage on ceiling");
+  });
+  doc.getElementById("pe-text").value = "  ";
+  doc.getElementById("pe-save").dispatchEvent(new w.Event("click"));
+  await sleep(50);
+  check("v64: no deja guardar el texto vacío", () => assert.match(toastText(), /can't be empty/));
+  doc.getElementById("pe-text").value = "Mancha de agua en el techo de la cocina";
+  doc.getElementById("pe-save").dispatchEvent(new w.Event("click"));
+  await sleep(300);
+  const phAfter = (await db.captures.forProject("p-del")).find((c) => c.id === "zz-cap");
+  check("v64: Save guarda el texto nuevo, el original y la traducción", () => {
+    assert.strictEqual(phAfter.caption, "Mancha de agua en el techo de la cocina");
+    assert.strictEqual(phAfter.originalCaption, "Water damage on ceiling");
+    assert.ok(phAfter.translation, "falta la traducción");
+    assert.strictEqual(phAfter.translatedFrom, phAfter.caption);
+    assert.match(doc.getElementById("sheet").textContent, /Mancha de agua[\s\S]*English translation/);
+  });
+
 
   let failed = 0;
   for (const [pass, name] of results) {

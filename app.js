@@ -767,23 +767,154 @@ function confirmDeleteProject(project) {
 // Full-size photo view — tapping a thumbnail in Recent Captures opens this
 // instead of leaving the picture squeezed into a small grid tile.
 function openPhotoViewer(photo) {
+  const caption = String(photo.caption || "").trim();
+  // v64: the photo's text can be edited, made clearer (✨) and translated.
+  const trOk = !!(photo.translation && caption && (photo.translatedFrom == null || photo.translatedFrom === caption));
   openSheet(`
     <div class="photo-viewer">
-      <img src="${photo.dataUrl}" alt="${photo.caption ? escapeHtml(photo.caption) : ""}">
-      ${
-        photo.caption
-          ? `<p class="empty" style="text-align:left; margin-top:10px;">${escapeHtml(photo.caption)}</p>`
-          : ""
-      }
+      <img src="${photo.dataUrl}" alt="${caption ? escapeHtml(caption) : ""}">
     </div>
+    ${caption ? `<div class="card" style="${noteCardStyle(trOk ? origLangOfTr(photo.translationLang) : "")}">${escapeHtml(caption)}</div>` : `<p class="empty" style="text-align:left;">This photo has no text yet.</p>`}
+    ${trOk ? translationCardHtml(photo.translation, photo.translationLang) : ""}
+    ${listenBarHtml(caption, trOk ? photo.translation : "", trOk ? photo.translationLang : "")}
+    <button class="btn ghost" id="pv-edit" style="width:100%;">✏️ ${caption ? "Edit text" : "Add text"}</button>
+    ${
+      aiConfigured() && caption
+        ? `<button class="btn ghost" id="pv-clarify" style="width:100%;">✨ Make it easy to understand</button>
+    <button class="btn ghost" id="pv-retr" style="width:100%;">🌐 ${trOk ? "Translate again" : "Translate"}</button>`
+        : ""
+    }
     <button class="btn ghost" id="pv-delete" style="width:100%; color:var(--red, #DC2626);">🗑 Delete photo</button>
     ${closeButton()}
   `);
   wireCloseButton();
+  document.getElementById("pv-edit").addEventListener("click", () => openPhotoEditSheet(photo));
+  document.getElementById("pv-clarify")?.addEventListener("click", () => {
+    openPhotoEditSheet(photo);
+    document.getElementById("pe-clarify")?.click();
+  });
+  wireRetranslate(
+    "pv-retr",
+    caption,
+    trOk ? photo.translation : "",
+    async (patch) => {
+      const full = { ...patch, translatedFrom: caption };
+      await MossDB.captures.update(photo.id, full);
+      Object.assign(photo, full);
+    },
+    () => {
+      openPhotoViewer(photo);
+      if (currentRoute().name === "project") render();
+    }
+  );
   document.getElementById("pv-delete").addEventListener("click", async () => {
     const [issues, caps] = await Promise.all([MossDB.issues.forProject(photo.projectId), MossDB.captures.forProject(photo.projectId)]);
     const owner = captureOwnerLabel(photo, issues, caps.filter((c) => c.type === "material"), caps.filter((c) => c.type === "inspection"));
     confirmCaptureDelete("photo", photo.projectId, [photo], owner, true);
+  });
+}
+
+// Edit the text under a photo (v64). Same tools as a voice note's text:
+// ✨ Make it easy to understand (with Undo), and the translation is made
+// again from the new text (or removed when there is no API key).
+function openPhotoEditSheet(photo) {
+  openSheet(`
+    <h2>Photo text</h2>
+    <img src="${photo.dataUrl}" alt="" style="width:100%; max-height:200px; object-fit:cover; border-radius:12px; display:block; margin-bottom:10px;">
+    <div class="field"><label>What the photo shows</label>
+      <textarea id="pe-text" rows="6" style="min-height:140px; line-height:1.5;" placeholder="Write what this photo is about">${escapeHtml(photo.caption || "")}</textarea>
+    </div>
+    ${
+      aiConfigured()
+        ? `<div style="display:flex; gap:8px; margin:-4px 0 10px;">
+      <button class="btn ghost" id="pe-clarify" style="flex:1;">✨ Make it easy to understand</button>
+      <button class="btn ghost" id="pe-undo" style="flex:none; display:none;">Undo</button>
+    </div>`
+        : ""
+    }
+    ${
+      photo.originalCaption && photo.originalCaption !== photo.caption
+        ? `<details style="margin:0 0 10px;"><summary class="desc" style="cursor:pointer;">The text before your changes</summary><p style="white-space:pre-wrap; font-size:14px; margin:6px 0 0;">${escapeHtml(photo.originalCaption)}</p></details>`
+        : ""
+    }
+    <p class="empty" style="text-align:left; margin-top:-4px;">${aiConfigured() ? "The translation will be made again from the new text." : "The old translation will be removed because it no longer matches."}</p>
+    <div class="sheet-actions">
+      <button class="btn ghost" id="pe-cancel">Back</button>
+      <button class="btn primary" id="pe-save">Save</button>
+    </div>
+  `);
+  document.getElementById("pe-cancel").addEventListener("click", () => openPhotoViewer(photo));
+
+  let beforeClarify = null;
+  const $clarify = document.getElementById("pe-clarify");
+  const $undo = document.getElementById("pe-undo");
+  $clarify?.addEventListener("click", async () => {
+    const $text = document.getElementById("pe-text");
+    const current = $text.value.trim();
+    if (!current) {
+      toast("There's no text to rewrite yet");
+      return;
+    }
+    const label = $clarify.textContent;
+    $clarify.disabled = true;
+    $clarify.textContent = "✨ Rewriting…";
+    try {
+      const clear = await withTimeout(clarifyNote(current), 45000, "no answer after 45 seconds");
+      if (!document.getElementById("pe-text")) return; // sheet closed meanwhile
+      beforeClarify = $text.value;
+      $text.value = clear;
+      if ($undo) $undo.style.display = "";
+      toast("Check the new text, then tap Save", 4000);
+    } catch (err) {
+      logError("AI make it clear (photo)", err);
+      toast(`Couldn't rewrite it: ${errorText(err)}`, 6000);
+    } finally {
+      $clarify.disabled = false;
+      $clarify.textContent = label;
+    }
+  });
+  $undo?.addEventListener("click", () => {
+    if (beforeClarify !== null) document.getElementById("pe-text").value = beforeClarify;
+    beforeClarify = null;
+    $undo.style.display = "none";
+  });
+
+  document.getElementById("pe-save").addEventListener("click", async () => {
+    const text = document.getElementById("pe-text").value.trim();
+    const btn = document.getElementById("pe-save");
+    // Empty isn't allowed: the OneDrive sync would bring the old text back.
+    if (!text) {
+      toast("The text can't be empty");
+      return;
+    }
+    if (text === String(photo.caption || "").trim()) {
+      openPhotoViewer(photo);
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    let patch = { caption: text, translation: "", translationLang: "", translatedFrom: "" };
+    if (aiConfigured()) {
+      const tr = await tryTranslate(text, true);
+      if (tr) patch = { caption: text, translation: tr.translation, translationLang: tr.target, translatedFrom: text };
+    }
+    // Keep the first text (the AI description) the first time it changes.
+    const original = photo.originalCaption || String(photo.caption || "").trim();
+    if (original) patch.originalCaption = original;
+    try {
+      await MossDB.captures.update(photo.id, patch);
+    } catch (err) {
+      logError("photo text save", err);
+      toast(`Couldn't save: ${errorText(err)}`, 6000);
+      btn.disabled = false;
+      btn.textContent = "Save";
+      return;
+    }
+    Object.assign(photo, patch);
+    toast("Photo text updated");
+    syncCapturesWithOneDrive();
+    if (currentRoute().name === "project") render();
+    openPhotoViewer(photo);
   });
 }
 
@@ -1527,7 +1658,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "63"; // matches the sw.js cache number
+const APP_VERSION = "64"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
