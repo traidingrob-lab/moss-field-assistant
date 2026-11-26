@@ -536,12 +536,28 @@ async function go(w, hash) {
     assert.strictEqual(rep.title, "Task List");
     const txt = JSON.stringify(rep.blocks);
     assert.match(txt, /SOON \(Pronto\)/);
-    assert.match(txt, /#\d  -  Soon/);
+    assert.match(txt, /#\d  -  SOON \(Pronto\)/);
+    assert.match(txt, /Do it in the next few days/);
     assert.match(txt, /Pedir azulejo/);
     assert.match(txt, /DONE \(Hechas\)/);
-    assert.match(txt, /#1  -  Done/);
+    assert.match(txt, /#1  -  DONE \(Hecha\)/);
+    assert.match(txt, /This task is finished/);
     assert.match(txt, /Change the bathroom faucet/);
   });
+  const repPh = w.eval("taskPdfReport")({ name: "X" }, [{ id: "ph1", text: "Con fotos", priority: "red", photos: ["data:image/jpeg;base64,AAAA"] }]);
+  check("v68: las fotos van 2 por fila (6 por página) con marco del color de la urgencia", () => {
+    const b = repPh.blocks.find((x) => x.type === "photos");
+    assert.ok(b, "faltan las fotos");
+    assert.strictEqual(b.cols, 2);
+    assert.strictEqual(JSON.stringify(b.borderRgb), "[220,38,38]");
+    assert.match(JSON.stringify(repPh.blocks), /URGENT \(Urgente\)[\s\S]*Do it right away/);
+  });
+  let phPdfOk = false;
+  try {
+    await w.eval("buildTextReportPdf")(repPh, { prepareImage: async () => null });
+    phPdfOk = true;
+  } catch (e) { console.log(e); }
+  check("v68: el PDF con fotos y marcos se arma sin error", () => assert.ok(phPdfOk));
   if (!w.URL.createObjectURL) { w.URL.createObjectURL = () => "blob:test"; w.URL.revokeObjectURL = () => {}; } // jsdom no los tiene (el teléfono sí)
   doc.getElementById("tp-pdf-create").dispatchEvent(new w.Event("click"));
   await sleep(1500);

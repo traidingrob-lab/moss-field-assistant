@@ -1658,7 +1658,7 @@ async function renderAsk() {
 // ---------- Accordions (compact dashboard lists) ----------
 // Each long list on a project shows only its latest item plus a count; tap
 // "Show all" to open the rest. On by default; Settings can turn it off.
-const APP_VERSION = "67"; // matches the sw.js cache number
+const APP_VERSION = "68"; // matches the sw.js cache number
 const ACCORDION_PREF = "moss_accordion";
 const ACCORDION_OPEN = "moss_accordion_open";
 
@@ -4299,9 +4299,12 @@ function wireRetranslate(id, noteText, previous, apply, done) {
 // materials); they are deleted outright.
 
 const TASK_PRIORITIES = [
-  { id: "red", label: "Urgent", es: "Urgente", color: "#DC2626", mark: "🔴" },
-  { id: "yellow", label: "Soon", es: "Pronto", color: "#D97706", mark: "🟡" },
-  { id: "green", label: "Can wait", es: "Puede esperar", color: "#16A34A", mark: "🟢" }
+  { id: "red", label: "Urgent", es: "Urgente", color: "#DC2626", mark: "🔴", rgb: [220, 38, 38],
+    desc: "Do it right away - it is holding up the job", esDesc: "Hacerlo ya - está deteniendo el trabajo" },
+  { id: "yellow", label: "Soon", es: "Pronto", color: "#D97706", mark: "🟡", rgb: [217, 119, 6],
+    desc: "Do it in the next few days", esDesc: "Hacerlo en los próximos días" },
+  { id: "green", label: "Can wait", es: "Puede esperar", color: "#16A34A", mark: "🟢", rgb: [22, 163, 74],
+    desc: "Do it when there is time", esDesc: "Hacerlo cuando haya tiempo" }
 ];
 const MAX_TASK_PHOTOS = 5;
 const taskPriority = (id) => TASK_PRIORITIES.find((p) => p.id === id) || TASK_PRIORITIES[1];
@@ -4901,15 +4904,20 @@ function taskPdfReport(project, tasks, generatedAt = new Date()) {
   };
 }
 
+// Each task: number + urgency, a short line saying what that urgency means,
+// the text, its translation and its photos. v68: the photos go 2 across x 3
+// down (6 per page), each in a thick frame of the task's urgency colour.
 function taskPdfBlocks(t, blocks) {
   const p = taskPriority(t.priority);
   const text = String(t.text || "").trim();
   const trOk = !!(text && t.translation && t.translatedFrom === text && (t.translationLang === "en" || t.translationLang === "es"));
-  blocks.push({ type: "label", text: `${taskNumberOf(t) ? `#${taskNumberOf(t)}  -  ` : ""}${t.done ? "Done" : p.label}` });
+  const num = taskNumberOf(t) ? `#${taskNumberOf(t)}  -  ` : "";
+  blocks.push({ type: "label", text: t.done ? `${num}DONE (Hecha)` : `${num}${p.label.toUpperCase()} (${p.es})` });
+  blocks.push({ type: "note", text: t.done ? "This task is finished / Esta tarea ya está hecha" : `${p.desc} / ${p.esDesc}` });
   if (text) blocks.push({ type: "text", text, lang: trOk ? (t.translationLang === "en" ? "es" : "en") : "" });
   else blocks.push({ type: "note", text: "(No written note)" });
   if (trOk) blocks.push({ type: "translation", label: translationLabel(t.translationLang), text: t.translation, lang: t.translationLang });
-  if ((t.photos || []).length) blocks.push({ type: "photos", photos: t.photos });
+  if ((t.photos || []).length) blocks.push({ type: "photos", photos: t.photos, cols: 2, cellH: 200, borderRgb: t.done ? [156, 163, 175] : p.rgb });
 }
 
 async function openTaskPdfSheet(projectId) {

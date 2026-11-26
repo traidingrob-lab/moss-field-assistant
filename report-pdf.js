@@ -788,7 +788,10 @@ async function buildInspectionsPdf(sections, opts = {}) {
 //   { type: "text",    text }                       paragraph(s)
 //   { type: "bullets", items: [text, ...] }
 //   { type: "project", name, meta }                 big project heading + rule
-//   { type: "photos",  photos: [dataUrl, ...] }     3-column photo grid
+//   { type: "photos",  photos: [dataUrl, ...], cols?, cellH?, borderRgb? }
+//                                                   photo grid (3 columns by default;
+//                                                   cols 2 + cellH 205 = 6 photos per page;
+//                                                   borderRgb = thick coloured frame on each photo)
 //   { type: "note",    text }                       small grey italic line
 async function buildTextReportPdf(report, opts = {}) {
   if (!window.jspdf || !window.jspdf.jsPDF) throw new Error("PDF library (jspdf.umd.min.js) isn't loaded.");
@@ -997,22 +1000,32 @@ async function buildTextReportPdf(report, opts = {}) {
         const pr = await prepareImage(d);
         if (pr) prepared.push(pr);
       }
-      const gap = 8;
-      const cellW = (contentW - gap * 2) / 3;
-      const cellH = 135;
-      for (let k = 0; k < prepared.length; k += 3) {
-        ensure(cellH + 8);
-        prepared.slice(k, k + 3).forEach((pr, c) => {
+      const cols = block.cols === 2 ? 2 : 3;
+      const cellH = Number(block.cellH) > 0 ? Number(block.cellH) : 135;
+      const border = Array.isArray(block.borderRgb) ? block.borderRgb : null;
+      const bw = border ? 4 : 0; // frame thickness, drawn just outside the photo
+      const gap = 8 + bw * 2;
+      const cellW = (contentW - bw * 2 - gap * (cols - 1)) / cols;
+      for (let k = 0; k < prepared.length; k += cols) {
+        ensure(cellH + 8 + bw * 2);
+        prepared.slice(k, k + cols).forEach((pr, c) => {
           const sc = Math.min(cellW / pr.width, cellH / pr.height);
           const w = pr.width * sc;
           const h = pr.height * sc;
-          const x = M + c * (cellW + gap);
-          doc.addImage(pr.dataUrl, "JPEG", x, y, w, h);
-          doc.setDrawColor(220, 224, 229);
-          doc.setLineWidth(0.5);
-          doc.rect(x, y, w, h);
+          const x = M + bw + c * (cellW + gap);
+          const top = y + bw;
+          doc.addImage(pr.dataUrl, "JPEG", x, top, w, h);
+          if (border) {
+            doc.setDrawColor(border[0], border[1], border[2]);
+            doc.setLineWidth(bw);
+            doc.rect(x - bw / 2, top - bw / 2, w + bw, h + bw);
+          } else {
+            doc.setDrawColor(220, 224, 229);
+            doc.setLineWidth(0.5);
+            doc.rect(x, top, w, h);
+          }
         });
-        y += cellH + 8;
+        y += cellH + 8 + bw * 2;
       }
       const missing = (block.photos || []).length - prepared.length;
       if (missing > 0) {
